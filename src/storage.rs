@@ -6,8 +6,10 @@ use std::{
     path::Path,
 };
 
+const KEY_SIZE: usize = 32;
+
 pub struct StorageEntry {
-    key: [u8; 32],
+    key: [u8; KEY_SIZE],
     value_len: u32,
     value: Vec<u8>,
     is_deleted: bool,
@@ -28,7 +30,7 @@ impl fmt::Display for StorageError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             StorageError::IoError(e) => write!(f, "IO error: {}", e),
-            StorageError::KeyTooLong => write!(f, "Key length exceeds 32 bytes"),
+            StorageError::KeyTooLong => write!(f, "Key length exceeds {} bytes", KEY_SIZE),
             StorageError::InvalidData => write!(f, "Invalid data format"),
         }
     }
@@ -62,12 +64,16 @@ impl Storage {
         Ok(Self { file })
     }
 
+    pub fn write_str(&mut self, key: &str, value: &str) -> StorageResult<()> {
+        self.write(key.as_bytes(), value.as_bytes())
+    }
+
     pub fn write(&mut self, key: &[u8], value: &[u8]) -> StorageResult<()> {
-        if key.len() > 32 {
+        if key.len() > KEY_SIZE {
             return Err(StorageError::KeyTooLong);
         }
 
-        let mut fixed_key = [0u8; 32];
+        let mut fixed_key = [0u8; KEY_SIZE];
         fixed_key[..key.len()].copy_from_slice(key);
 
         let entry = StorageEntry {
@@ -90,8 +96,14 @@ impl Storage {
         Ok(())
     }
 
+    pub fn read_str(&mut self, key: &str) -> StorageResult<Option<String>> {
+        self.read(key.as_bytes()).map(|opt_vec| {
+            opt_vec.map(|vec| String::from_utf8_lossy(&vec).into_owned())
+        })
+    }
+
     pub fn read(&mut self, key: &[u8]) -> StorageResult<Option<Vec<u8>>> {
-        let mut search_key = [0u8; 32];
+        let mut search_key = [0u8; KEY_SIZE];
         search_key[..key.len()].copy_from_slice(key);
 
         self.file.seek(SeekFrom::Start(0))?;
@@ -99,7 +111,7 @@ impl Storage {
         let mut latest_value: Option<Vec<u8>> = None;
 
         loop {
-            let mut current_key = [0u8; 32];
+            let mut current_key = [0u8; KEY_SIZE];
             match self.file.read_exact(&mut current_key) {
                 Ok(_) => {}
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
@@ -135,8 +147,12 @@ impl Storage {
         Ok(latest_value)
     }
 
+    pub fn delete_str(&mut self, key: &str) -> StorageResult<()> {
+        self.delete(key.as_bytes())
+    }
+
     pub fn delete(&mut self, key: &[u8]) -> StorageResult<()> {
-        let mut search_key = [0u8; 32];
+        let mut search_key = [0u8; KEY_SIZE];
         search_key[..key.len()].copy_from_slice(key);
 
         let entry = StorageEntry {
