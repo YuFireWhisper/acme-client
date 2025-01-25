@@ -51,7 +51,7 @@ impl From<io::Error> for StorageError {
     }
 }
 
-type StorageResult<T> = std::result::Result<T, StorageError>;
+pub type StorageResult<T> = std::result::Result<T, StorageError>;
 
 impl Storage {
     pub fn open<P: AsRef<Path>>(path: P) -> StorageResult<Self> {
