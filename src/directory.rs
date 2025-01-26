@@ -1,35 +1,35 @@
-use std::fs;
+use serde::{Deserialize, Serialize};
+use std::error::Error;
 
-use serde::Deserialize;
+use crate::storage::Storage;
 
-static LETS_ENCRYPT_DIRECTORY_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Directory {
     #[serde(rename = "newAccount")]
-    new_account: String,
+    pub new_account: String,
     #[serde(rename = "newNonce")]
-    new_nonce: String,
+    pub new_nonce: String,
     #[serde(rename = "newOrder")]
-    new_order: String,
+    pub new_order: String,
     #[serde(rename = "renewalInfo")]
-    renewal_info: Option<String>,
+    pub renewal_info: Option<String>,
     #[serde(rename = "revokeCert")]
-    reovke_cert: String,
+    pub reovke_cert: String,
 }
 
-impl Directory { 
-    async fn from_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let resp = reqwest::get(url).await?;
-        let dir: Directory = resp.json().await?;
+impl Directory {
+    pub fn new(storage: &mut Storage, url: &str) -> Result<Self, Box<dyn Error>> {
+        if let Some(data) = storage.read_file(url)? {
+            return Ok(serde_json::from_slice(&data)?);
+        }
 
-        Ok(dir)
-    }
-    
-    async fn from_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let content = fs::read_to_string(path)?; 
-        let directory: Directory = serde_json::from_str(&content)?;
-        
+        let client = reqwest::blocking::Client::new();
+        let response = client.get(url).send()?;
+        let directory: Directory = response.json()?;
+
+        let serialized = serde_json::to_string(&directory)?.as_bytes();
+        storage.write_file(url, serialized)?;
+
         Ok(directory)
     }
 }

@@ -1,4 +1,12 @@
 pub mod account;
-pub mod cert;
+pub mod base64;
+pub mod certificate;
 pub mod directory;
+pub mod jwk;
+pub mod jws;
+pub mod nonce;
+pub mod payload;
+pub mod protection;
+pub mod signature;
 pub mod storage;
+pub mod key_pair;

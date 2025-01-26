@@ -4,7 +4,15 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::storage::{Storage, StorageError};
+use crate::{
+    directory::Directory,
+    jwk::Jwk,
+    key_pair::KeyPair,
+    nonce::Nonce,
+    protection::Protection,
+    signature::create_signature,
+    storage::{Storage, StorageError},
+};
 
 pub enum AccountError {
     StorageError(StorageError),
@@ -35,50 +43,75 @@ impl From<serde_json::Error> for AccountError {
 pub type AccountResult<T> = result::Result<T, AccountError>;
 
 pub struct Account {
-    url: String,
+    email: String,
+    account_url: String,
+    key_pair: KeyPair,
+    storage: Storage,
 }
 
-const ACCOUNT_URL_KEY: String = "account_url_".to_string();
-const NEW_ACCOUNT_URL_KEY: String = "new_account_url".to_string();
+const ACCOUNT_DIR: String = "account".to_string();
+const ACCOUNT_URL: String = "account_url".to_string();
 
 impl Account {
-    pub fn new(storage: &mut Storage, email: &str) -> AccountResult<Self> {
-        if let Ok(Some(url)) = storage.read_str(&Self::acc_url_key_of(email)) {
-            return Ok(Account { url });
+    pub fn new(
+        storage: Storage,
+        dir: Directory,
+        key_pair: KeyPair,
+        email: &str,
+    ) -> AccountResult<Self> {
+        let account_url_store_path: &str = &ACCOUNT_DIR + "/" + email + "/" + &ACCOUNT_URL;
+
+        if let Some(account_url) = storage.read_file(account_url_store_path)? {
+            return Ok(Account {
+                email: email.to_string(),
+                account_url: String::from_utf8(account_url)?,
+                key_pair,
+                storage,
+            });
         }
 
-        let new_account = Self::create_account(storage, email)?;
-        storage
-            .write_str(&Self::acc_url_key_of(email), &new_account.orders)
-            .map_err(AccountError::StorageError)?;
+        let account_url = Account::create_account(dir, key_pair, email)?;
+        storage.write_file(account_url_store_path, account_url.as_bytes())?;
 
         Ok(Account {
-            url: new_account.orders,
+            email: email.to_string(),
+            account_url,
+            key_pair,
+            storage,
         })
     }
 
-    fn create_account(storage: &mut Storage, email: &str) -> AccountResult<NewAccountResponse> {
-        let new_account_url = storage
-            .read_str(&NEW_ACCOUNT_URL_KEY)?
-            .ok_or("url not found")?;
+    pub fn create_account(dir: Directory, key_pair: KeyPair, email: &str) -> AccountResult<String> {
+        let new_account_api = &dir.new_account;
+        let nonce = Nonce::new(&dir.new_nonce);
 
-        let client = Client::new();
-        let req = NewAccountRequest {
+        let jwk = Jwk::new(&key_pair, None)?;
+        let header = Protection::new(nonce, key_pair.alg_name).set_value(jwk);
+        let payload = serde_json::to_string(&NewAccountRequest {
             terms_of_service_agreed: true,
             contact: vec![format!("mailto:{}", email)],
-        };
+        })?;
+        let signature = create_signature(header.to_string(), payload, key_pair);
 
-        let resp = client
-            .post(&new_account_url)
-            .json(&req)
-            .send()?
-            .json::<NewAccountResponse>()?;
+        let jws = serde_json::to_string(&Value::Object({
+            let mut map = serde_json::Map::new();
+            map.insert("protected".to_string(), header.to_string().into());
+            map.insert("payload".to_string(), payload.into());
+            map.insert("signature".to_string(), signature.into());
+            map
+        }))?;
 
-        Ok(resp)
-    }
+        let client = Client::new();
+        let response = client
+            .post(new_account_api)
+            .header("Content-Type", "application/jose+json")
+            .body(jws)
+            .send()?;
 
-    pub fn acc_url_key_of(email: &str) -> String {
-        ACCOUNT_URL_KEY + email
+        let new_account_response: NewAccountResponse = response.json()?;
+        let account_url = new_account_response.orders;
+
+        Ok(account_url)
     }
 }
 
