@@ -48,3 +48,44 @@ impl Base64 {
         &self.encoded
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_encoding() {
+        let input = "Hello, World!";
+        let base64 = Base64::new(input);
+        assert_eq!(base64.as_str(), "SGVsbG8sIFdvcmxkIQ==");
+    }
+
+    #[test]
+    fn test_url_safe_encoding() {
+        let input = "Hello+World/123=";
+        let base64 = Base64::new(input);
+        let url_safe = base64.base64_url();
+        assert!(!url_safe.contains('+'));
+        assert!(!url_safe.contains('/'));
+        assert!(!url_safe.contains('='));
+    }
+
+    #[test]
+    fn test_different_lengths() {
+        let base64 = Base64::new("a");
+        assert_eq!(base64.as_str(), "YQ==");
+
+        let base64 = Base64::new("ab");
+        assert_eq!(base64.as_str(), "YWI=");
+
+        let base64 = Base64::new("abc");
+        assert_eq!(base64.as_str(), "YWJj");
+    }
+
+    #[test]
+    fn test_binary_data() {
+        let input = vec![0xFF, 0x00, 0xFF];
+        let base64 = Base64::new(input);
+        assert_eq!(base64.as_str(), "/wD/");
+    }
+}

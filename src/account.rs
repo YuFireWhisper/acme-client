@@ -1,67 +1,67 @@
-use std::result;
+use std::string::FromUtf8Error;
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use thiserror::Error;
 
 use crate::{
     directory::Directory,
-    jwk::Jwk,
+    jwk::{Jwk, JwkError},
     key_pair::KeyPair,
     nonce::Nonce,
-    protection::Protection,
-    signature::create_signature,
+    protection::{Protection, ProtectionError},
+    signature::{create_signature, SignatureError},
     storage::{Storage, StorageError},
 };
 
+#[derive(Debug, Error)]
 pub enum AccountError {
-    StorageError(StorageError),
-    RequestError(reqwest::Error),
-    JsonError(serde_json::Error),
-    UrlNotFound,
-    Unknown,
+    #[error("Request error: {0}")]
+    RequestError(#[from] reqwest::Error),
+
+    #[error("JSON error: {0}")]
+    JsonError(#[from] serde_json::Error),
+
+    #[error("UTF-8 error: {0}")]
+    Utf8Error(#[from] FromUtf8Error),
+
+    #[error("Storage error: {0}")]
+    StorageError(#[from] StorageError),
+
+    #[error("JWK error: {0}")]
+    JwkError(#[from] JwkError),
+
+    #[error("Protection error: {0}")]
+    ProtectionError(#[from] ProtectionError),
+
+    #[error("Signature error: {0}")]
+    SignatureError(#[from] SignatureError),
 }
 
-impl From<StorageError> for AccountError {
-    fn from(err: StorageError) -> Self {
-        AccountError::StorageError(err)
-    }
-}
-
-impl From<reqwest::Error> for AccountError {
-    fn from(err: reqwest::Error) -> Self {
-        AccountError::RequestError(err)
-    }
-}
-
-impl From<serde_json::Error> for AccountError {
-    fn from(err: serde_json::Error) -> Self {
-        AccountError::JsonError(err)
-    }
-}
-
-pub type AccountResult<T> = result::Result<T, AccountError>;
+pub type Result<T> = std::result::Result<T, AccountError>;
 
 pub struct Account {
     email: String,
     account_url: String,
     key_pair: KeyPair,
-    storage: Storage,
+    storage: Box<dyn Storage>,
 }
 
-const ACCOUNT_DIR: String = "account".to_string();
-const ACCOUNT_URL: String = "account_url".to_string();
-
 impl Account {
-    pub fn new(
-        storage: Storage,
+    const ACCOUNT_DIR: &'static str = "account";
+    const ACCOUNT_URL: &'static str = "account_url";
+
+    pub fn new<T: Storage + 'static>(
+        storage: Box<T>,
         dir: Directory,
         key_pair: KeyPair,
         email: &str,
-    ) -> AccountResult<Self> {
-        let account_url_store_path: &str = &ACCOUNT_DIR + "/" + email + "/" + &ACCOUNT_URL;
+    ) -> Result<Self> {
+        let account_url_path = Account::get_account_url_path(email);
+        let account_url_path = account_url_path.as_str();
 
-        if let Some(account_url) = storage.read_file(account_url_store_path)? {
+        if let Some(account_url) = storage.read_file(account_url_path)? {
             return Ok(Account {
                 email: email.to_string(),
                 account_url: String::from_utf8(account_url)?,
@@ -70,8 +70,8 @@ impl Account {
             });
         }
 
-        let account_url = Account::create_account(dir, key_pair, email)?;
-        storage.write_file(account_url_store_path, account_url.as_bytes())?;
+        let account_url = Account::create_account(dir, &key_pair, email)?;
+        storage.write_file(account_url_path, account_url.as_bytes())?;
 
         Ok(Account {
             email: email.to_string(),
@@ -81,22 +81,41 @@ impl Account {
         })
     }
 
-    pub fn create_account(dir: Directory, key_pair: KeyPair, email: &str) -> AccountResult<String> {
+    fn get_account_url_path(email: &str) -> String {
+        let mut account_url_path = String::with_capacity(
+            Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
+        );
+        account_url_path.push_str(Self::ACCOUNT_DIR);
+        account_url_path.push('/');
+        account_url_path.push_str(email);
+        account_url_path.push('/');
+        account_url_path.push_str(Self::ACCOUNT_URL);
+
+        account_url_path
+    }
+
+    pub fn create_account(dir: Directory, key_pair: &KeyPair, email: &str) -> Result<String> {
         let new_account_api = &dir.new_account;
         let nonce = Nonce::new(&dir.new_nonce);
 
-        let jwk = Jwk::new(&key_pair, None)?;
-        let header = Protection::new(nonce, key_pair.alg_name).set_value(jwk);
-        let payload = serde_json::to_string(&NewAccountRequest {
+        let jwk = Jwk::new(key_pair, None)?;
+        let header = Protection::new(&nonce, &key_pair.alg_name)
+            .set_value(jwk)?
+            .create_header(new_account_api)?;
+        let payload = NewAccountPayload {
             terms_of_service_agreed: true,
             contact: vec![format!("mailto:{}", email)],
-        })?;
-        let signature = create_signature(header.to_string(), payload, key_pair);
+        };
+
+        let signature = create_signature(&header, &payload, key_pair)?;
 
         let jws = serde_json::to_string(&Value::Object({
             let mut map = serde_json::Map::new();
             map.insert("protected".to_string(), header.to_string().into());
-            map.insert("payload".to_string(), payload.into());
+            map.insert(
+                "payload".to_string(),
+                serde_json::to_string(&payload)?.into(),
+            );
             map.insert("signature".to_string(), signature.into());
             map
         }))?;
@@ -116,7 +135,7 @@ impl Account {
 }
 
 #[derive(Debug, Serialize)]
-struct NewAccountRequest {
+struct NewAccountPayload {
     terms_of_service_agreed: bool,
     contact: Vec<String>,
 }

@@ -3,22 +3,28 @@ use openssl::{
     pkey::{Id, PKey, Private, Public},
     rsa::Rsa,
 };
-use std::{error::Error, str::FromStr};
 
-use crate::storage::Storage;
+use crate::storage::{Storage, StorageError};
 
+#[derive(Debug)]
 pub enum KeyError {
-    OpenSslError(openssl::error::ErrorStack),
-    UnsupportedKeyType,
+    OpenSsl(ErrorStack),
+    Storage(StorageError),
+    UnsupportedAlgorithm,
+    KeyConversionFailed,
 }
 
-impl From<openssl::error::ErrorStack> for KeyError {
-    fn from(error: openssl::error::ErrorStack) -> Self {
-        KeyError::OpenSslError(error)
+impl From<ErrorStack> for KeyError {
+    fn from(error: ErrorStack) -> Self {
+        KeyError::OpenSsl(error)
     }
 }
 
-type KeyResult<T> = Result<T, KeyError>;
+impl From<StorageError> for KeyError {
+    fn from(error: StorageError) -> Self {
+        KeyError::Storage(error)
+    }
+}
 
 pub struct KeyPair {
     pub alg_name: String,
@@ -28,70 +34,66 @@ pub struct KeyPair {
 
 impl KeyPair {
     const KEY_PAIR_DIR: &'static str = "key_pair";
-    const PRIVATE_KEY_PATH: &'static str = "private_key";
+    const PRIVATE_KEY_SUFFIX: &'static str = "/private_key";
 
-    pub fn new(storage: Storage, alg_name: &str, bits: Option<u32>) -> KeyResult<Self> {
-        let alg_name = Self::normalize_name(alg_name);
-        if let Some(pri_key) =
-            storage.read_file(Self::KEY_PAIR_DIR + "/" + &alg_name + Self::PRIVATE_KEY_PATH)?
-        {
-            return Ok(KeyPair {
+    pub fn new<T: Storage>(storage: &T, alg_name: &str, bits: Option<u32>) -> Result<Self, KeyError> {
+        let alg_name = Self::normalize_algorithm_name(alg_name)?;
+        let key_path = format!(
+            "{}/{}{}",
+            Self::KEY_PAIR_DIR,
+            &alg_name,
+            Self::PRIVATE_KEY_SUFFIX
+        );
+
+        if let Some(pri_key_data) = storage.read_file(&key_path)? {
+            let pri_key = PKey::private_key_from_pem(&pri_key_data)?;
+            let pub_key = Self::derive_public_key(&pri_key)?;
+            return Ok(Self {
                 alg_name,
-                pri_key: PKey::private_key_from_pem(&pri_key)?,
-                pub_key: Self::public_key_from_private_pem(&pri_key)?,
+                pri_key,
+                pub_key,
             });
         }
 
-        let pri_key = Self::generate(&alg_name, bits)?;
-        let pub_key = Self::public_key_from_private_key(&pri_key)?;
+        let pri_key = Self::generate_key(&alg_name, bits)?;
+        let pub_key = Self::derive_public_key(&pri_key)?;
 
-        storage.write_file(
-            Self::KEY_PAIR_DIR + "/" + &alg_name + Self::PRIVATE_KEY_PATH,
-            &pri_key.private_key_to_pem_pkcs8()?,
-        )?;
+        storage.write_file(&key_path, &pri_key.private_key_to_pem_pkcs8()?)?;
 
-        Ok(KeyPair {
+        Ok(Self {
             alg_name,
             pri_key,
             pub_key,
         })
     }
 
-    fn normalize_name(name: &str) -> String {
+    fn normalize_algorithm_name(name: &str) -> Result<String, KeyError> {
         match name.to_uppercase().as_str() {
-            "RSA" | "RS256" | "RS384" | "RS512" => "RSA".to_string(),
+            "RSA" => Ok("RSA".to_owned()),
+            _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
 
-    fn public_key_from_private_pem(pri_key: &Vec<u8>) -> Result<PKey<Public>, ErrorStack> {
-        let pri_key = PKey::private_key_from_pem(pri_key)?;
-        let pub_key = Self::public_key_from_private_key(&pri_key)?;
-        Ok(pub_key)
-    }
-
-    fn public_key_from_private_key(pri_key: &PKey<Private>) -> Result<PKey<Public>, ErrorStack> {
+    fn derive_public_key(pri_key: &PKey<Private>) -> Result<PKey<Public>, KeyError> {
         match pri_key.id() {
             Id::RSA => {
                 let rsa = pri_key.rsa()?;
-                return PKey::from_rsa(Rsa::from_public_components(
-                    rsa.n().to_owned()?,
-                    rsa.e().to_owned()?,
-                )?);
+                let pub_rsa =
+                    Rsa::from_public_components(rsa.n().to_owned()?, rsa.e().to_owned()?)?;
+                Ok(PKey::from_rsa(pub_rsa)?)
             }
-            _ => Err("Unsupported key type".into()),
+            _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
 
-    pub fn generate(alg_name: &str, bits: Option<u32>) -> Result<PKey<Private>, Box<dyn Error>> {
-        let alg_name = Self::normalize_name(alg_name);
-
-        match alg_name.as_str() {
+    fn generate_key(alg_name: &str, bits: Option<u32>) -> Result<PKey<Private>, KeyError> {
+        match alg_name {
             "RSA" => {
-                let bits = bits.unwrap_or(2048);
-                let rsa = Rsa::generate(bits)?;
+                let rsa = Rsa::generate(bits.unwrap_or(2048))?;
                 Ok(PKey::from_rsa(rsa)?)
             }
-            _ => Err("Unsupported key type".into()),
+            _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
 }
+

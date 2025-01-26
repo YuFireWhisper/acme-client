@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
-pub trait Payload: Serialize + for<'de> Deserialize<'de> {
+pub trait PayloadT: Serialize + for<'de> Deserialize<'de> {
     fn to_json_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
@@ -30,7 +30,7 @@ impl AccountPayload {
     }
 }
 
-impl Payload for AccountPayload {
+impl PayloadT for AccountPayload {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         if self.contact.is_empty() {
             return Err("Contact information is required".into());
@@ -68,7 +68,7 @@ impl OrderPayload {
     }
 }
 
-impl Payload for OrderPayload {
+impl PayloadT for OrderPayload {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         if self.order_id.is_empty() {
             return Err("Order ID is required".into());
@@ -83,7 +83,7 @@ impl Payload for OrderPayload {
     }
 }
 
-pub fn process_payload<T: Payload>(payload: &T) -> Result<String, Box<dyn Error>> {
+pub fn process_payload<T: PayloadT>(payload: &T) -> Result<String, Box<dyn Error>> {
     payload.validate()?;
     Ok(payload.to_json_string()?)
 }

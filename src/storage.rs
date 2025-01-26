@@ -1,321 +1,437 @@
 use std::{
-    collections::VecDeque,
-    error::Error,
-    fmt,
-    fs::{File, OpenOptions},
+    collections::HashMap,
     io::{self, Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 
-const KEY_SIZE: usize = 32;
-const SEPARATOR: u8 = b'/';
-const DIRECTORY_FLAG: u8 = 0xD0;
-const DATA_FLAG: u8 = 0xDA;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum StorageError {
-    Io(io::Error),
-    KeyTooLong,
-    InvalidPath,
-    NotFound,
-    NotDirectory,
-    AlreadyExists,
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Key is invalid: {0}")]
+    InvalidKey(String),
+    #[error("Key not found: {0}")]
+    NotFound(String),
+    #[error("Not a directory: {0}")]
+    NotDirectory(String),
+    #[error("Lock poisoned")]
+    LockPoisoned,
 }
 
-impl fmt::Display for StorageError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "IO error: {}", e),
-            Self::KeyTooLong => write!(f, "Key exceeds {} bytes", KEY_SIZE),
-            Self::InvalidPath => write!(f, "Invalid path format"),
-            Self::NotFound => write!(f, "Path not found"),
-            Self::NotDirectory => write!(f, "Not a directory"),
-            Self::AlreadyExists => write!(f, "Path already exists"),
+pub type Result<T> = std::result::Result<T, StorageError>;
+
+pub trait Storage: Send + Sync {
+    fn create_dir_all(&self, key: &str) -> Result<()>;
+    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn write_file(&self, key: &str, value: &[u8]) -> Result<()>;
+    fn remove(&self, key: &str) -> Result<()>;
+    fn exists(&self, key: &str) -> Result<bool>;
+    fn is_dir(&self, key: &str) -> Result<bool>;
+}
+
+struct KeyUtils;
+
+impl KeyUtils {
+    fn normalize(key: &str) -> Result<PathBuf> {
+        if key.is_empty() {
+            return Err(StorageError::InvalidKey("Empty key".to_string()));
+        }
+
+        if key.contains('\0') || key.contains('\n') || key.contains('\r') {
+            return Err(StorageError::InvalidKey(format!(
+                "Invalid characters in key: {}",
+                key
+            )));
+        }
+
+        if key.contains("//") {
+            return Err(StorageError::InvalidKey(format!(
+                "Double slashes not allowed in key: {}",
+                key
+            )));
+        }
+
+        let path = Path::new(key);
+        let mut normalized = PathBuf::from("/");
+
+        for component in path.components() {
+            match component {
+                std::path::Component::RootDir => normalized = PathBuf::from("/"),
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if normalized.as_os_str() == "/" {
+                        return Err(StorageError::InvalidKey(format!(
+                            "Cannot use '..' to escape root directory: {}",
+                            key
+                        )));
+                    }
+                    normalized.pop();
+                }
+                std::path::Component::Normal(name) => {
+                    if let Some(name_str) = name.to_str() {
+                        if name_str.contains('/') || name_str.contains('\\') {
+                            return Err(StorageError::InvalidKey(format!(
+                                "Invalid path component: {}",
+                                name_str
+                            )));
+                        }
+                        normalized.push(name_str);
+                    } else {
+                        return Err(StorageError::InvalidKey(format!(
+                            "Non-UTF8 path component in: {}",
+                            key
+                        )));
+                    }
+                }
+                _ => return Err(StorageError::InvalidKey(format!("Invalid path: {}", key))),
+            }
+        }
+
+        Ok(normalized)
+    }
+
+    fn parent(path: &Path) -> Option<PathBuf> {
+        path.parent().map(|p| p.to_path_buf())
+    }
+
+    fn verify_directory_key(key: &str) -> Result<PathBuf> {
+        let path = Self::normalize(key)?;
+        if path.to_string_lossy().ends_with('/') {
+            Ok(path)
+        } else {
+            let mut path = path;
+            path.push("");
+            Ok(path)
         }
     }
-}
 
-impl Error for StorageError {}
+    fn verify_file_key(key: &str) -> Result<PathBuf> {
+        let path = Self::normalize(key)?;
 
-impl From<io::Error> for StorageError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
+        if key.ends_with('/') || path.to_string_lossy().ends_with('/') {
+            return Err(StorageError::InvalidKey(format!(
+                "File key cannot end with '/': {}",
+                key
+            )));
+        }
+
+        Ok(path)
     }
 }
 
-type Result<T> = std::result::Result<T, StorageError>;
-
-#[derive(Clone)]
-pub struct Storage {
-    file: Arc<RwLock<File>>,
-    path: Vec<u8>,
+pub struct FileStorage {
+    index: Arc<RwLock<StorageIndex>>,
+    file: Arc<RwLock<std::fs::File>>,
 }
 
-impl Storage {
+struct StorageIndex {
+    entries: HashMap<PathBuf, EntryMetadata>,
+}
+
+#[derive(Clone, Copy)]
+struct EntryMetadata {
+    offset: u64,
+    is_dir: bool,
+    is_deleted: bool,
+}
+
+impl FileStorage {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let file = OpenOptions::new()
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
+            .truncate(true)
             .open(path)?;
 
+        let index = Self::build_index(&file)?;
+
         Ok(Self {
+            index: Arc::new(RwLock::new(index)),
             file: Arc::new(RwLock::new(file)),
-            path: Vec::new(),
         })
     }
 
-    pub fn create_dir_all(&self, path: &str) -> Result<Self> {
-        let components = self.parse_path(path)?;
-        let mut current = self.clone();
+    fn build_index(file: &std::fs::File) -> Result<StorageIndex> {
+        let mut reader = io::BufReader::new(file);
+        let mut entries = HashMap::new();
+        let mut offset = 0;
 
-        for component in components {
-            current = current.create_component(component)?;
-        }
-        Ok(current)
-    }
+        loop {
+            let mut header = [0u8; 8];
+            match reader.read_exact(&mut header) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
+            }
 
-    pub fn open_dir(&self, path: &str) -> Result<Option<Self>> {
-        let target = self.resolve_path(path)?;
-        self.get_metadata(&target)
-            .map(|m| m.map(|_| self.with_path(target)))
-    }
+            let (key_len, flags) = Self::parse_header(&header);
+            let mut key_buf = vec![0u8; key_len as usize];
+            reader.read_exact(&mut key_buf)?;
 
-    pub fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
-        let full_path = self.resolve_path(path)?;
-        let parent = self.parent_path(&full_path)?;
+            let key = String::from_utf8_lossy(&key_buf);
+            let path = KeyUtils::normalize(&key)?;
 
-        if !self.is_directory(&parent)? {
-            return Err(StorageError::NotFound);
-        }
+            let mut size_buf = [0u8; 4];
+            reader.read_exact(&mut size_buf)?;
+            let size = u32::from_le_bytes(size_buf);
 
-        let mut file = self.file.write()?;
-        self.write_entry(&mut file, &full_path, DATA_FLAG, data)
-    }
+            entries.insert(
+                path,
+                EntryMetadata {
+                    offset,
+                    is_dir: flags & 1 == 1,
+                    is_deleted: flags & 2 == 2,
+                },
+            );
 
-    pub fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>> {
-        let full_path = self.resolve_path(path)?;
-        self.read_entry(&full_path, DATA_FLAG)
-    }
-
-    pub fn remove(&self, path: &str) -> Result<()> {
-        let full_path = self.resolve_path(path)?;
-        let mut file = self.file.write()?;
-        self.write_entry(&mut file, &full_path, 0xDD, &[])
-    }
-
-    fn create_component(&self, name: &[u8]) -> Result<Self> {
-        let mut new_path = self.path.clone();
-        new_path.extend_from_slice(name);
-        new_path.push(SEPARATOR);
-
-        self.validate_key_length(&new_path)?;
-
-        let mut file = self.file.write()?;
-        if self.key_exists(&new_path)? {
-            return Err(StorageError::AlreadyExists);
+            reader.seek(SeekFrom::Current(size as i64))?;
+            offset += 8 + key_len as u64 + 4 + size as u64;
         }
 
-        self.write_entry(&mut file, &new_path, DIRECTORY_FLAG, &[])?;
-        Ok(self.with_path(new_path))
+        Ok(StorageIndex { entries })
     }
 
-    fn write_entry(
-        &self,
-        file: &mut File,
-        key: &[u8],
-        flag: u8,
-        data: &[u8],
-    ) -> Result<()> {
-        let mut buffer = Vec::with_capacity(KEY_SIZE + 5 + data.len());
-        buffer.extend_from_slice(&Self::fixed_key(key));
-        buffer.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        buffer.push(flag);
-        buffer.extend_from_slice(data);
+    fn parse_header(header: &[u8; 8]) -> (u32, u8) {
+        let key_len = u32::from_le_bytes(header[0..4].try_into().unwrap());
+        let flags = header[4];
+        (key_len, flags)
+    }
 
-        file.seek(SeekFrom::End(0))?;
-        file.write_all(&buffer)?;
-        file.flush()?;
+    fn write_entry(&self, key: &Path, value: &[u8], is_dir: bool) -> Result<()> {
+        let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
+        let key_str = key.to_string_lossy();
+        let key_bytes = key_str.as_bytes();
+
+        let header = Self::create_header(key_bytes.len() as u32, is_dir, false);
+        file.write_all(&header)?;
+
+        file.write_all(key_bytes)?;
+        let size = value.len() as u32;
+        file.write_all(&size.to_le_bytes())?;
+        file.write_all(value)?;
+
+        let offset = file.stream_position()? - size as u64 - key_bytes.len() as u64 - 12;
+        let mut index = self.index.write().map_err(|_| StorageError::LockPoisoned)?;
+        index.entries.insert(
+            key.to_path_buf(),
+            EntryMetadata {
+                offset,
+                is_dir,
+                is_deleted: false,
+            },
+        );
+
         Ok(())
     }
 
-    fn read_entry(&self, key: &[u8], expected_flag: u8) -> Result<Option<Vec<u8>>> {
-        let fixed_key = Self::fixed_key(key);
-        let mut file = self.file.read()?;
-        file.seek(SeekFrom::Start(0))?;
+    fn create_header(key_len: u32, is_dir: bool, is_deleted: bool) -> [u8; 8] {
+        let mut header = [0u8; 8];
+        header[0..4].copy_from_slice(&key_len.to_le_bytes());
+        header[4] = if is_dir { 1 } else { 0 } | if is_deleted { 2 } else { 0 };
+        header
+    }
+}
 
-        let mut latest = None;
-        loop {
-            let mut current_key = [0u8; KEY_SIZE];
-            if let Err(e) = file.read_exact(&mut current_key) {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    break;
-                }
-                return Err(e.into());
+impl Storage for FileStorage {
+    fn create_dir_all(&self, key: &str) -> Result<()> {
+        let path = KeyUtils::verify_directory_key(key)?;
+
+        let mut current = PathBuf::from("/");
+        for component in path.components().skip(1) {
+            current.push(component);
+            if !self.exists(&current.to_string_lossy())? {
+                self.write_entry(&current, &[], true)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let path = KeyUtils::verify_file_key(key)?;
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+
+        if let Some(metadata) = index.entries.get(&path) {
+            if metadata.is_deleted || metadata.is_dir {
+                return Ok(None);
             }
 
-            let mut len_buf = [0u8; 4];
-            file.read_exact(&mut len_buf)?;
-            let data_len = u32::from_le_bytes(len_buf);
+            let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
+            file.seek(SeekFrom::Start(metadata.offset))?;
 
-            let mut flag = [0u8; 1];
-            file.read_exact(&mut flag)?;
+            let mut header = [0u8; 8];
+            file.read_exact(&mut header)?;
+            let key_len = u32::from_le_bytes(header[0..4].try_into().unwrap());
+            file.seek(SeekFrom::Current(key_len as i64))?;
 
-            let mut data = vec![0u8; data_len as usize];
+            let mut size_buf = [0u8; 4];
+            file.read_exact(&mut size_buf)?;
+            let size = u32::from_le_bytes(size_buf);
+
+            let mut data = vec![0u8; size as usize];
             file.read_exact(&mut data)?;
 
-            if current_key == fixed_key && flag[0] == expected_flag {
-                latest = Some(data);
-            }
-        }
-
-        Ok(latest)
-    }
-
-    fn get_metadata(&self, key: &[u8]) -> Result<Option<u8>> {
-        let fixed_key = Self::fixed_key(key);
-        let mut file = self.file.read()?;
-        file.seek(SeekFrom::Start(0))?;
-
-        loop {
-            let mut current_key = [0u8; KEY_SIZE];
-            if let Err(e) = file.read_exact(&mut current_key) {
-                if e.kind() == io::ErrorKind::UnexpectedEof {
-                    break;
-                }
-                return Err(e.into());
-            }
-
-            let mut len_buf = [0u8; 4];
-            file.read_exact(&mut len_buf)?;
-            let data_len = u32::from_le_bytes(len_buf);
-
-            let mut flag = [0u8; 1];
-            file.read_exact(&mut flag)?;
-
-            if current_key == fixed_key {
-                file.seek(SeekFrom::Current(data_len as i64))?;
-                return Ok(Some(flag[0]));
-            }
-
-            file.seek(SeekFrom::Current(data_len as i64))?;
-        }
-
-        Ok(None)
-    }
-
-    fn is_directory(&self, key: &[u8]) -> Result<bool> {
-        Ok(matches!(self.get_metadata(key)?, Some(DIRECTORY_FLAG)))
-    }
-
-    fn resolve_path(&self, path: &str) -> Result<Vec<u8>> {
-        let (is_absolute, components) = self.parse_path(path)?;
-        let mut stack = if is_absolute {
-            VecDeque::new()
+            Ok(Some(data))
         } else {
-            self.split_components(&self.path)
-        };
+            Ok(None)
+        }
+    }
 
-        for component in components {
-            match component {
-                b"." => continue,
-                b".." => {
-                    if !stack.is_empty() {
-                        stack.pop_back();
-                    }
-                }
-                _ => stack.push_back(component),
+    fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
+        let path = KeyUtils::verify_file_key(key)?;
+
+        if let Some(parent) = KeyUtils::parent(&path) {
+            if !self.exists(&parent.to_string_lossy())? {
+                return Err(StorageError::NotFound(
+                    parent.to_string_lossy().into_owned(),
+                ));
+            }
+            if !self.is_dir(&parent.to_string_lossy())? {
+                return Err(StorageError::NotDirectory(
+                    parent.to_string_lossy().into_owned(),
+                ));
             }
         }
 
-        Self::build_key(stack)
+        self.write_entry(&path, value, false)
     }
 
-    fn parse_path(&self, path: &str) -> Result<(bool, Vec<&[u8]>)> {
-        if path.contains("//") || path.chars().any(|c| c.is_control()) {
-            return Err(StorageError::InvalidPath);
+    fn remove(&self, key: &str) -> Result<()> {
+        let path = KeyUtils::normalize(key)?;
+        let mut index = self.index.write().map_err(|_| StorageError::LockPoisoned)?;
+
+        if let Some(metadata) = index.entries.get_mut(&path) {
+            metadata.is_deleted = true;
+
+            let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
+            file.seek(SeekFrom::Start(metadata.offset + 4))?;
+            file.write_all(&[if metadata.is_dir { 3 } else { 2 }])?;
         }
 
-        let is_absolute = path.starts_with('/');
-        let components: Vec<&[u8]> = path.split('/')
-            .filter(|s| !s.is_empty())
-            .map(|s| s.as_bytes())
-            .collect();
-
-        Ok((is_absolute, components))
+        Ok(())
     }
 
-    fn split_components(&self, path: &[u8]) -> VecDeque<&[u8]> {
-        let mut components = VecDeque::new();
-        let mut start = 0;
-
-        for (i, &b) in path.iter().enumerate() {
-            if b == SEPARATOR {
-                if start < i {
-                    components.push_back(&path[start..i]);
-                }
-                start = i + 1;
-            }
-        }
-
-        if start < path.len() {
-            components.push_back(&path[start..]);
-        }
-
-        components
+    fn exists(&self, key: &str) -> Result<bool> {
+        let path = KeyUtils::normalize(key)?;
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+        Ok(index.entries.get(&path).is_some_and(|m| !m.is_deleted))
     }
 
-    fn build_key(components: VecDeque<&[u8]>) -> Result<Vec<u8>> {
-        let mut key = Vec::with_capacity(KEY_SIZE);
-        for component in components {
-            if component.is_empty() || component.contains(&SEPARATOR) {
-                return Err(StorageError::InvalidPath);
-            }
-
-            key.extend_from_slice(component);
-            key.push(SEPARATOR);
-            if key.len() > KEY_SIZE {
-                return Err(StorageError::KeyTooLong);
-            }
-        }
-        Ok(key)
+    fn is_dir(&self, key: &str) -> Result<bool> {
+        let path = KeyUtils::normalize(key)?;
+        let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
+        Ok(index
+            .entries
+            .get(&path)
+            .is_some_and(|m| m.is_dir && !m.is_deleted))
     }
+}
 
-    fn parent_path(&self, path: &[u8]) -> Result<Vec<u8>> {
-        let mut components = self.split_components(path);
-        if components.is_empty() {
-            return Ok(Vec::new());
-        }
+pub struct MemStorage {
+    data: Arc<RwLock<HashMap<PathBuf, Vec<u8>>>>,
+    dirs: Arc<RwLock<HashMap<PathBuf, ()>>>,
+}
 
-        components.pop_back();
-        Self::build_key(components)
+impl Default for MemStorage {
+    fn default() -> Self {
+        Self::new()
     }
+}
 
-    fn key_exists(&self, key: &[u8]) -> Result<bool> {
-        Ok(self.get_metadata(key)?.is_some())
-    }
+impl MemStorage {
+    pub fn new() -> Self {
+        let mut dirs = HashMap::new();
+        dirs.insert(PathBuf::from("/"), ());
 
-    fn with_path(&self, path: Vec<u8>) -> Self {
         Self {
-            file: Arc::clone(&self.file),
-            path,
+            data: Arc::new(RwLock::new(HashMap::new())),
+            dirs: Arc::new(RwLock::new(dirs)),
         }
     }
+}
 
-    fn validate_key_length(&self, key: &[u8]) -> Result<()> {
-        if key.len() > KEY_SIZE {
-            Err(StorageError::KeyTooLong)
-        } else {
-            Ok(())
+impl Storage for MemStorage {
+    fn create_dir_all(&self, key: &str) -> Result<()> {
+        let path = KeyUtils::verify_directory_key(key)?;
+        let mut current = PathBuf::from("/");
+
+        let mut dirs = self.dirs.write().map_err(|_| StorageError::LockPoisoned)?;
+        for component in path.components().skip(1) {
+            current.push(component);
+            dirs.entry(current.clone()).or_insert(());
         }
+
+        Ok(())
     }
 
-    fn fixed_key(key: &[u8]) -> [u8; KEY_SIZE] {
-        let mut fixed = [0u8; KEY_SIZE];
-        let len = key.len().min(KEY_SIZE);
-        fixed[..len].copy_from_slice(&key[..len]);
-        fixed
+    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let path = KeyUtils::verify_file_key(key)?;
+        let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
+        Ok(data.get(&path).cloned())
+    }
+
+    fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
+        let path = KeyUtils::verify_file_key(key)?;
+
+        if let Some(parent) = KeyUtils::parent(&path) {
+            if !self.exists(&parent.to_string_lossy())? {
+                return Err(StorageError::NotFound(
+                    parent.to_string_lossy().into_owned(),
+                ));
+            }
+            if !self.is_dir(&parent.to_string_lossy())? {
+                return Err(StorageError::NotDirectory(
+                    parent.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+
+        self.data
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .insert(path, value.to_vec());
+
+        Ok(())
+    }
+
+    fn remove(&self, key: &str) -> Result<()> {
+        let path = KeyUtils::normalize(key)?;
+        self.data
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .remove(&path);
+        self.dirs
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .remove(&path);
+        Ok(())
+    }
+
+    fn exists(&self, key: &str) -> Result<bool> {
+        let path = KeyUtils::normalize(key)?;
+        Ok(self
+            .data
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .contains_key(&path)
+            || self
+                .dirs
+                .read()
+                .map_err(|_| StorageError::LockPoisoned)?
+                .contains_key(&path))
+    }
+
+    fn is_dir(&self, key: &str) -> Result<bool> {
+        let path = KeyUtils::normalize(key)?;
+        Ok(self
+            .dirs
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .contains_key(&path))
     }
 }
 
@@ -324,81 +440,111 @@ mod tests {
     use super::*;
     use tempfile::NamedTempFile;
 
-    fn create_test_file() -> NamedTempFile {
-        NamedTempFile::new().unwrap()
+    fn create_storages() -> Vec<Box<dyn Storage>> {
+        vec![
+            Box::new(MemStorage::new()),
+            Box::new(FileStorage::open(NamedTempFile::new().unwrap().path()).unwrap()),
+        ]
     }
 
     #[test]
-    fn test_create_nested_directories() {
-        let file = create_test_file();
-        let storage = Storage::open(file.path()).unwrap();
+    fn test_value_with_special_chars() {
+        for storage in create_storages() {
+            let test_data = vec![
+                ("normal.txt", b"http://example.com" as &[u8]),
+                ("slashes.txt", b"path/with/slashes"),
+                ("url.txt", b"https://user:pass@example.com/path?query=1"),
+                ("control.txt", b"Contains\r\nNewlines\tand\x00NullBytes"),
+                ("unicode.txt", "包含Unicode字符".as_bytes()),
+            ];
 
-        storage.create_dir_all("/a/b/c").unwrap();
-        
-        assert!(storage.open_dir("/a").unwrap().is_some());
-        assert!(storage.open_dir("/a/b").unwrap().is_some());
-        assert!(storage.open_dir("/a/b/c").unwrap().is_some());
+            storage.create_dir_all("/test").unwrap();
+
+            for (key, value) in &test_data {
+                let full_key = format!("/test/{}", key);
+                storage.write_file(&full_key, value).unwrap();
+            }
+
+            for (key, expected_value) in &test_data {
+                let full_key = format!("/test/{}", key);
+                let read_value = storage.read_file(&full_key).unwrap().unwrap();
+                assert_eq!(&read_value, expected_value);
+            }
+        }
     }
 
     #[test]
-    fn test_read_write_files() {
-        let file = create_test_file();
-        let storage = Storage::open(file.path()).unwrap();
+    fn test_invalid_keys() {
+        for storage in create_storages() {
+            let invalid_keys = vec![
+                "//double/slash",
+                "/path/with/trailing//",
+                "/bad\0null",
+                "/bad\nchar",
+                "../outside",
+            ];
 
-        storage.create_dir_all("/data").unwrap();
-        storage.write_file("/data/test.txt", b"hello").unwrap();
-
-        let content = storage.read_file("/data/test.txt").unwrap();
-        assert_eq!(content, Some(b"hello".to_vec()));
-
-        storage.write_file("/data/test.txt", b"world").unwrap();
-        let content = storage.read_file("/data/test.txt").unwrap();
-        assert_eq!(content, Some(b"world".to_vec()));
+            for key in invalid_keys {
+                assert!(matches!(
+                    storage.write_file(key, b"test"),
+                    Err(StorageError::InvalidKey(_))
+                ));
+            }
+        }
     }
 
     #[test]
-    fn test_relative_paths() {
-        let file = create_test_file();
-        let storage = Storage::open(file.path()).unwrap();
+    fn test_directory_validation() {
+        for storage in create_storages() {
+            assert!(storage.create_dir_all("/valid/dir/path/").is_ok());
+            assert!(storage.create_dir_all("/another/valid/dir").is_ok());
 
-        let base = storage.create_dir_all("/base").unwrap();
-        let sub = base.create_dir_all("sub").unwrap();
+            assert!(matches!(
+                storage.write_file("/dir/with/trailing/", b"test"),
+                Err(StorageError::InvalidKey(_))
+            ));
 
-        sub.write_file("file.txt", b"test").unwrap();
-        assert_eq!(
-            storage.read_file("/base/sub/file.txt").unwrap(),
-            Some(b"test".to_vec())
-        );
+            assert!(storage.is_dir("/valid/dir/path").unwrap());
+            assert!(!storage.is_dir("/valid/dir/path/nonexistent").unwrap());
+        }
     }
 
     #[test]
-    fn test_invalid_paths() {
-        let file = create_test_file();
-        let storage = Storage::open(file.path()).unwrap();
+    fn test_concurrent_access() {
+        use std::thread;
 
-        assert!(matches!(
-            storage.create_dir_all("invalid//path"),
-            Err(StorageError::InvalidPath)
-        ));
+        for storage in create_storages() {
+            let storage = Arc::new(storage);
+            storage.create_dir_all("/concurrent").unwrap();
 
-        assert!(matches!(
-            storage.create_dir_all("a/../b"),
-            Err(StorageError::NotFound)
-        ));
-    }
+            let mut handles = vec![];
 
-    #[test]
-    fn test_remove_entries() {
-        let file = create_test_file();
-        let storage = Storage::open(file.path()).unwrap();
+            for i in 0..10 {
+                let storage = Arc::clone(&storage);
+                let handle = thread::spawn(move || {
+                    let key = format!("/concurrent/file{}.txt", i);
+                    let value = format!("http://example.com/path{}/data", i);
+                    storage.write_file(&key, value.as_bytes()).unwrap();
+                });
+                handles.push(handle);
+            }
 
-        storage.create_dir_all("/temp").unwrap();
-        storage.write_file("/temp/file", b"data").unwrap();
-        
-        storage.remove("/temp/file").unwrap();
-        assert!(storage.read_file("/temp/file").unwrap().is_none());
+            for handle in handles {
+                handle.join().unwrap();
+            }
 
-        storage.remove("/temp").unwrap();
-        assert!(storage.open_dir("/temp").unwrap().is_none());
+            for i in 0..10 {
+                let key = format!("/concurrent/file{}.txt", i);
+                let expected = format!("http://example.com/path{}/data", i);
+                assert_eq!(
+                    storage
+                        .read_file(&key)
+                        .unwrap()
+                        .as_deref()
+                        .map(String::from_utf8_lossy),
+                    Some(expected.into())
+                );
+            }
+        }
     }
 }

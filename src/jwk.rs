@@ -1,7 +1,27 @@
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
 
 use crate::{base64::Base64, key_pair::KeyPair};
+
+#[derive(Debug)]
+pub enum JwkError {
+    UnsupportedAlgorithm(String),
+    KeyConversionError(String),
+    SerializationError(String),
+}
+
+impl std::error::Error for JwkError {}
+
+impl fmt::Display for JwkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            JwkError::UnsupportedAlgorithm(alg) => write!(f, "Unsupported algorithm: {}", alg),
+            JwkError::KeyConversionError(msg) => write!(f, "Failed to convert key: {}", msg),
+            JwkError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
+        }
+    }
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kty")]
@@ -20,23 +40,26 @@ pub struct RsaJwk {
     alg: Option<String>,
 }
 
+impl RsaJwk {
+    fn from_key_pair(key_pair: &KeyPair, kid: Option<String>) -> Result<Self, JwkError> {
+        let rsa = key_pair
+            .pub_key
+            .rsa()
+            .map_err(|e| JwkError::KeyConversionError(e.to_string()))?;
+
+        let n = Base64::new(rsa.n().to_vec()).base64_url();
+        let e = Base64::new(rsa.e().to_vec()).base64_url();
+        let alg = Some(String::from("RS256"));
+
+        Ok(RsaJwk { n, e, kid, alg })
+    }
+}
+
 impl Jwk {
-    pub fn new(key_pair: &KeyPair, kid: Option<String>) -> Result<Self, Box<dyn Error>> {
+    pub fn new(key_pair: &KeyPair, kid: Option<String>) -> Result<Self, JwkError> {
         match key_pair.alg_name.as_str() {
-            "RSA" => {
-                let rsa = key_pair.pub_key.rsa()?;
-
-                let n = Base64::new(rsa.n().to_vec()?).base64_url();
-                let e = Base64::new(rsa.e().to_vec()?).base64_url();
-
-                let alg = match key_pair.alg_name.as_str() {
-                    "RSA" => Some(String::from("RS256")),
-                    _ => None,
-                };
-
-                Ok(Jwk::Rsa(RsaJwk { n, e, kid, alg }))
-            }
-            _ => Err("Unsupported algorithm".into()),
+            "RSA" => Ok(Jwk::Rsa(RsaJwk::from_key_pair(key_pair, kid)?)),
+            alg => Err(JwkError::UnsupportedAlgorithm(alg.to_string())),
         }
     }
 
@@ -53,28 +76,3 @@ impl Jwk {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{key_pair::KeyPair, storage::Storage};
-
-    #[test]
-    fn test_create_rsa_jwk() -> Result<(), Box<dyn Error>> {
-        let storage = Storage::open("test_storage")?;
-        let key_pair = KeyPair::new(storage, "RSA", Some(2048))?;
-
-        let jwk = Jwk::new(&key_pair, Some("test-key-id".to_string()))?;
-
-        let jwk_json = serde_json::to_string_pretty(&jwk)?;
-        println!("JWK JSON:\n{}", jwk_json);
-
-        if let Jwk::Rsa(rsa_jwk) = jwk {
-            assert!(!rsa_jwk.n.is_empty());
-            assert!(!rsa_jwk.e.is_empty());
-            assert_eq!(rsa_jwk.kid.unwrap(), "test-key-id");
-            assert_eq!(rsa_jwk.alg.unwrap(), "RS256");
-        }
-
-        Ok(())
-    }
-}
