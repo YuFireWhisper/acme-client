@@ -1,47 +1,23 @@
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::error::Error;
+use thiserror::Error;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum DirectoryError {
-    JsonError(serde_json::Error),
-    RequestError(reqwest::Error),
-    StorageError(StorageError),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("Request error: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
 }
-
-impl std::fmt::Display for DirectoryError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            DirectoryError::JsonError(err) => write!(f, "Json error: {}", err),
-            DirectoryError::RequestError(err) => write!(f, "Request error: {}", err),
-            DirectoryError::StorageError(err) => write!(f, "Storage error: {}", err),
-        }
-    }
-}
-
-impl From<serde_json::Error> for DirectoryError {
-    fn from(err: serde_json::Error) -> Self {
-        DirectoryError::JsonError(err)
-    }
-}
-
-impl From<reqwest::Error> for DirectoryError {
-    fn from(err: reqwest::Error) -> Self {
-        DirectoryError::RequestError(err)
-    }
-}
-
-impl From<StorageError> for DirectoryError {
-    fn from(err: StorageError) -> Self {
-        DirectoryError::StorageError(err)
-    }
-}
-
-impl Error for DirectoryError {}
 
 type DirectoryResult<T> = std::result::Result<T, DirectoryError>;
 
-use crate::storage::{Storage, StorageError};
+use crate::{
+    base64::Base64,
+    storage::{Storage, StorageError},
+};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Directory {
@@ -59,7 +35,9 @@ pub struct Directory {
 
 impl Directory {
     pub fn new<T: Storage>(storage: &mut T, url: &str) -> DirectoryResult<Self> {
-        if let Some(data) = storage.read_file(url)? {
+        let storage_key = Base64::new(url.as_bytes()).base64_url();
+
+        if let Some(data) = storage.read_file(&storage_key)? {
             return Ok(serde_json::from_slice(&data)?);
         }
 
@@ -68,7 +46,7 @@ impl Directory {
         let directory: Directory = response.json()?;
 
         let serialized = serde_json::to_vec(&directory)?;
-        storage.write_file(url, &serialized)?;
+        storage.write_file(&storage_key, &serialized)?;
 
         Ok(directory)
     }
@@ -94,6 +72,7 @@ mod tests {
     fn fetch_from_network_and_store() {
         let mut server = Server::new();
         let url = server.url();
+        let storage_key = Base64::new(url.as_bytes()).base64_url();
 
         let dir = create_test_directory();
         let dir_json = serde_json::to_vec(&dir).unwrap();
@@ -110,19 +89,20 @@ mod tests {
 
         mock.assert();
         assert_eq!(result.new_account, dir.new_account);
-        assert_eq!(storage.read_file(&url).unwrap().unwrap(), dir_json);
+        assert_eq!(storage.read_file(&storage_key).unwrap().unwrap(), dir_json);
     }
 
     #[test]
     fn use_cached_data_when_available() {
         let mut server = Server::new();
         let url = server.url();
+        let storage_key = Base64::new(url.as_bytes()).base64_url();
 
         let dir = create_test_directory();
         let dir_json = serde_json::to_vec(&dir).unwrap();
 
         let mut storage = MemStorage::new();
-        storage.write_file(&url, &dir_json).unwrap();
+        storage.write_file(&storage_key, &dir_json).unwrap();
 
         let mock = server.mock("GET", "/").expect(0).create();
 
@@ -142,7 +122,7 @@ mod tests {
         let result = Directory::new(&mut storage, &url);
 
         mock.assert();
-        assert!(matches!(result, Err(DirectoryError::RequestError(_))));
+        assert!(matches!(result, Err(DirectoryError::Request(_))));
     }
 
     #[test]
@@ -160,6 +140,6 @@ mod tests {
         let result = Directory::new(&mut storage, &url);
 
         mock.assert();
-        assert!(matches!(result, Err(DirectoryError::JsonError(_))));
+        assert!(matches!(result, Err(DirectoryError::Request(_))));
     }
 }
