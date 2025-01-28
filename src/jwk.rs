@@ -1,27 +1,17 @@
-use core::fmt;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::{base64::Base64, key_pair::KeyPair};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum JwkError {
+    #[error("Unsupported algorithm: {0}")]
     UnsupportedAlgorithm(String),
+    #[error("Failed to convert key: {0}")]
     KeyConversionError(String),
-    SerializationError(String),
+    #[error("Serialization error: {0}")]
+    SerializationError(#[from] serde_json::Error),
 }
-
-impl std::error::Error for JwkError {}
-
-impl fmt::Display for JwkError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            JwkError::UnsupportedAlgorithm(alg) => write!(f, "Unsupported algorithm: {}", alg),
-            JwkError::KeyConversionError(msg) => write!(f, "Failed to convert key: {}", msg),
-            JwkError::SerializationError(msg) => write!(f, "Serialization error: {}", msg),
-        }
-    }
-}
-
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kty")]
@@ -75,4 +65,3 @@ impl Jwk {
         }
     }
 }
-
