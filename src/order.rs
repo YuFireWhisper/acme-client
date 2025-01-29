@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{
     account::Account,
+    challenge::Challenge,
     jws::{Jws, JwsError},
     payload::{Identifier, NewOrderPayload},
     protection::{Protection, ProtectionError},
@@ -71,6 +72,8 @@ pub struct Order {
     pub order_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
+    #[serde(skip)]
+    pub challenges: Vec<Challenge>,
 }
 
 impl Order {
@@ -104,10 +107,19 @@ impl Order {
             .map_err(|_| OrderError::InvalidLocationHeader)?
             .to_owned();
 
-        account.storage.write_file(&order_storage_path, order_url.as_bytes())?;
+        account
+            .storage
+            .write_file(&order_storage_path, order_url.as_bytes())?;
 
         let mut order: Self = response.json()?;
         order.order_url = order_url;
+
+        order.challenges = order
+            .authorizations
+            .iter()
+            .filter_map(|auth_url| Challenge::from_url(auth_url).ok())
+            .flatten()
+            .collect();
 
         Ok(order)
     }

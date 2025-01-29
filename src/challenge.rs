@@ -1,4 +1,5 @@
 use openssl::hash::{hash, MessageDigest};
+use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -111,6 +112,17 @@ fn init_instructions() -> HashMap<&'static str, Instructions> {
 }
 
 impl Challenge {
+    pub fn from_url(auth_url: &str) -> Result<Vec<Self>, reqwest::Error> {
+        let response = Client::new()
+            .get(auth_url)
+            .header("Content-Type", "application/json")
+            .send()?;
+
+        let json = response.text()?;
+        let challenges = Challenge::from_json(&json, "your-key-thumbprint").unwrap_or_default();
+        Ok(challenges)
+    }
+
     pub fn from_json(
         json: &str,
         account_key_thumbprint: &str,
