@@ -245,7 +245,14 @@ impl Storage for FileStorage {
         let mut current = PathBuf::from("/");
         for component in path.components().skip(1) {
             current.push(component);
-            if !self.exists(&current.to_string_lossy())? {
+
+            if self.exists(&current.to_string_lossy())? {
+                if !self.is_dir(&current.to_string_lossy())? {
+                    return Err(StorageError::NotDirectory(
+                        current.to_string_lossy().into_owned(),
+                    ));
+                }
+            } else {
                 self.write_entry(&current, &[], true)?;
             }
         }
@@ -292,9 +299,7 @@ impl Storage for FileStorage {
 
         if let Some(parent) = KeyUtils::parent(&path) {
             if !self.exists(&parent.to_string_lossy())? {
-                return Err(StorageError::NotFound(
-                    parent.to_string_lossy().into_owned(),
-                ));
+                self.create_dir_all(&parent.to_string_lossy())?;
             }
             if !self.is_dir(&parent.to_string_lossy())? {
                 return Err(StorageError::NotDirectory(
@@ -368,6 +373,18 @@ impl Storage for MemStorage {
         let mut dirs = self.dirs.write().map_err(|_| StorageError::LockPoisoned)?;
         for component in path.components().skip(1) {
             current.push(component);
+
+            if self
+                .data
+                .read()
+                .map_err(|_| StorageError::LockPoisoned)?
+                .contains_key(&current)
+            {
+                return Err(StorageError::NotDirectory(
+                    current.to_string_lossy().into_owned(),
+                ));
+            }
+
             dirs.entry(current.clone()).or_insert(());
         }
 
@@ -389,9 +406,7 @@ impl Storage for MemStorage {
 
         if let Some(parent) = KeyUtils::parent(&path) {
             if !self.exists(&parent.to_string_lossy())? {
-                return Err(StorageError::NotFound(
-                    parent.to_string_lossy().into_owned(),
-                ));
+                self.create_dir_all(&parent.to_string_lossy())?;
             }
             if !self.is_dir(&parent.to_string_lossy())? {
                 return Err(StorageError::NotDirectory(
@@ -549,6 +564,32 @@ mod tests {
                 let read_value = storage.read_file(&key).unwrap();
                 assert_eq!(String::from_utf8_lossy(&read_value), expected);
             }
+        }
+    }
+
+    #[test]
+    fn test_create_dir_all_with_existing_file() {
+        for storage in create_storages() {
+            storage.write_file("/a/b", b"test data").unwrap();
+
+            let result = storage.create_dir_all("/a/b/c");
+            assert!(matches!(result, Err(StorageError::NotDirectory(_))));
+
+            let data = storage.read_file("/a/b").unwrap();
+            assert_eq!(data, b"test data");
+        }
+    }
+
+    #[test]
+    fn test_create_dir_all_with_existing_dir() {
+        for storage in create_storages() {
+            storage.create_dir_all("/a/b").unwrap();
+
+            let result = storage.create_dir_all("/a/b");
+            assert!(result.is_ok());
+
+            assert!(storage.exists("/a/b").unwrap());
+            assert!(storage.is_dir("/a/b").unwrap());
         }
     }
 }
