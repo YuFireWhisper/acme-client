@@ -45,14 +45,20 @@ impl KeyPair {
             Self::PRIVATE_KEY_SUFFIX
         );
 
-        if let Some(pri_key_data) = storage.read_file(&key_path)? {
-            let pri_key = PKey::private_key_from_pem(&pri_key_data)?;
-            let pub_key = Self::derive_public_key(&pri_key)?;
-            return Ok(Self {
-                alg_name,
-                pri_key,
-                pub_key,
-            });
+        match storage.read_file(&key_path) {
+            Ok(pri_key_data) => {
+                let pri_key = PKey::private_key_from_pem(&pri_key_data)?;
+                let pub_key = Self::derive_public_key(&pri_key)?;
+                return Ok(Self {
+                    alg_name,
+                    pri_key,
+                    pub_key,
+                });
+            }
+            Err(StorageError::NotFound(_)) => {}
+            Err(e) => {
+                return Err(KeyError::Storage(e));
+            }
         }
 
         let pri_key = Self::generate_key(&alg_name, bits)?;

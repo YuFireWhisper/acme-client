@@ -15,6 +15,8 @@ pub enum StorageError {
     InvalidKey(String),
     #[error("Key not found: {0}")]
     NotFound(String),
+    #[error("Key is a dir: {0}")]
+    IsDir(String),
     #[error("Not a directory: {0}")]
     NotDirectory(String),
     #[error("Lock poisoned")]
@@ -25,7 +27,7 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 
 pub trait Storage: Send + Sync {
     fn create_dir_all(&self, key: &str) -> Result<()>;
-    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    fn read_file(&self, key: &str) -> Result<Vec<u8>>;
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()>;
     fn remove(&self, key: &str) -> Result<()>;
     fn exists(&self, key: &str) -> Result<bool>;
@@ -251,13 +253,17 @@ impl Storage for FileStorage {
         Ok(())
     }
 
-    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn read_file(&self, key: &str) -> Result<Vec<u8>> {
         let path = KeyUtils::verify_file_key(key)?;
         let index = self.index.read().map_err(|_| StorageError::LockPoisoned)?;
 
         if let Some(metadata) = index.entries.get(&path) {
-            if metadata.is_deleted || metadata.is_dir {
-                return Ok(None);
+            if metadata.is_deleted {
+                return Err(StorageError::NotFound(key.to_string()));
+            }
+
+            if metadata.is_dir {
+                return Err(StorageError::IsDir(key.to_string()));
             }
 
             let mut file = self.file.write().map_err(|_| StorageError::LockPoisoned)?;
@@ -275,9 +281,9 @@ impl Storage for FileStorage {
             let mut data = vec![0u8; size as usize];
             file.read_exact(&mut data)?;
 
-            Ok(Some(data))
+            Ok(data)
         } else {
-            Ok(None)
+            Err(StorageError::NotFound(key.to_string()))
         }
     }
 
@@ -368,10 +374,14 @@ impl Storage for MemStorage {
         Ok(())
     }
 
-    fn read_file(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    fn read_file(&self, key: &str) -> Result<Vec<u8>> {
         let path = KeyUtils::verify_file_key(key)?;
         let data = self.data.read().map_err(|_| StorageError::LockPoisoned)?;
-        Ok(data.get(&path).cloned())
+        if let Some(value) = data.get(&path) {
+            Ok(value.clone())
+        } else {
+            Err(StorageError::NotFound(key.to_string()))
+        }
     }
 
     fn write_file(&self, key: &str, value: &[u8]) -> Result<()> {
@@ -467,7 +477,7 @@ mod tests {
 
             for (key, expected_value) in &test_data {
                 let full_key = format!("/test/{}", key);
-                let read_value = storage.read_file(&full_key).unwrap().unwrap();
+                let read_value = storage.read_file(&full_key).unwrap();
                 assert_eq!(&read_value, expected_value);
             }
         }
@@ -536,14 +546,8 @@ mod tests {
             for i in 0..10 {
                 let key = format!("/concurrent/file{}.txt", i);
                 let expected = format!("http://example.com/path{}/data", i);
-                assert_eq!(
-                    storage
-                        .read_file(&key)
-                        .unwrap()
-                        .as_deref()
-                        .map(String::from_utf8_lossy),
-                    Some(expected.into())
-                );
+                let read_value = storage.read_file(&key).unwrap();
+                assert_eq!(String::from_utf8_lossy(&read_value), expected);
             }
         }
     }

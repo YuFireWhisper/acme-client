@@ -37,8 +37,15 @@ impl Directory {
     pub fn new<T: Storage>(storage: &mut T, url: &str) -> DirectoryResult<Self> {
         let storage_key = Base64::new(url.as_bytes()).base64_url();
 
-        if let Some(data) = storage.read_file(&storage_key)? {
-            return Ok(serde_json::from_slice(&data)?);
+        match storage.read_file(&storage_key) {
+            Ok(data) => {
+                return Ok(serde_json::from_slice(&data)?);
+            }
+            Err(StorageError::NotFound(_)) => { 
+            }
+            Err(e) => {
+                return Err(DirectoryError::Storage(e));
+            }
         }
 
         let client = Client::new();
@@ -89,7 +96,7 @@ mod tests {
 
         mock.assert();
         assert_eq!(result.new_account, dir.new_account);
-        assert_eq!(storage.read_file(&storage_key).unwrap().unwrap(), dir_json);
+        assert_eq!(storage.read_file(&storage_key).unwrap(), dir_json);
     }
 
     #[test]

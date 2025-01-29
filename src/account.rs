@@ -43,8 +43,10 @@ pub type Result<T> = std::result::Result<T, AccountError>;
 
 pub struct Account {
     email: String,
-    account_url: String,
-    key_pair: KeyPair,
+    pub account_url: String,
+    pub key_pair: KeyPair,
+    pub nonce: Nonce,
+    pub dir: Directory,
     storage: Box<dyn Storage>,
 }
 
@@ -61,22 +63,28 @@ impl Account {
         let account_url_path = Account::get_account_url_path(email);
         let account_url_path = account_url_path.as_str();
 
-        if let Some(account_url) = storage.read_file(account_url_path)? {
+        let nonce = Nonce::new(&dir.new_nonce);
+
+        if let Ok(account_url) = storage.read_file(account_url_path) {
             return Ok(Account {
                 email: email.to_string(),
                 account_url: String::from_utf8(account_url)?,
                 key_pair,
+                nonce,
+                dir,
                 storage,
             });
         }
 
-        let account_url = Account::create_account(dir, &key_pair, email)?;
+        let account_url = Account::create_account(&dir, &key_pair, email)?;
         storage.write_file(account_url_path, account_url.as_bytes())?;
 
         Ok(Account {
             email: email.to_string(),
             account_url,
             key_pair,
+            nonce,
+            dir,
             storage,
         })
     }
@@ -94,7 +102,7 @@ impl Account {
         account_url_path
     }
 
-    pub fn create_account(dir: Directory, key_pair: &KeyPair, email: &str) -> Result<String> {
+    pub fn create_account(dir: &Directory, key_pair: &KeyPair, email: &str) -> Result<String> {
         let new_account_api = &dir.new_account;
         let nonce = Nonce::new(&dir.new_nonce);
 

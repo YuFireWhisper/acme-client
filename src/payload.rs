@@ -41,3 +41,48 @@ impl PayloadT for AccountPayload {
         Ok(())
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Identifier {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NewOrderPayload {
+    pub identifiers: Vec<Identifier>,
+}
+
+impl NewOrderPayload {
+    pub fn new(domains: Vec<&str>) -> Self {
+        let identifiers = domains
+            .into_iter()
+            .map(|domain| Identifier {
+                type_: "dns".to_string(),
+                value: domain.to_string(),
+            })
+            .collect();
+
+        NewOrderPayload {
+            identifiers,
+        }
+    }
+}
+
+impl PayloadT for NewOrderPayload {
+    fn validate(&self) -> Result<(), Box<dyn Error>> {
+        if self.identifiers.is_empty() {
+            return Err("At least one identifier is required".into());
+        }
+        for identifier in &self.identifiers {
+            if identifier.type_ != "dns" {
+                return Err("Identifier type must be 'dns'".into());
+            }
+            if identifier.value.is_empty() {
+                return Err("Identifier value cannot be empty".into());
+            }
+        }
+        Ok(())
+    }
+}
