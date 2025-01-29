@@ -47,7 +47,8 @@ pub struct Account {
     pub key_pair: KeyPair,
     pub nonce: Nonce,
     pub dir: Directory,
-    storage: Box<dyn Storage>,
+    pub storage: Box<dyn Storage>,
+    pub storage_path: String,
 }
 
 impl Account {
@@ -73,6 +74,7 @@ impl Account {
                 nonce,
                 dir,
                 storage,
+                storage_path: Self::get_storage_path(email),
             });
         }
 
@@ -86,6 +88,7 @@ impl Account {
             nonce,
             dir,
             storage,
+            storage_path: Self::get_storage_path(email),
         })
     }
 
@@ -100,6 +103,18 @@ impl Account {
         account_url_path.push_str(Self::ACCOUNT_URL);
 
         account_url_path
+    }
+
+    fn get_storage_path(email: &str) -> String {
+        let mut storage_path = String::with_capacity(
+            Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
+        );
+        storage_path.push_str(Self::ACCOUNT_DIR);
+        storage_path.push('/');
+        storage_path.push_str(email);
+        storage_path.push('/');
+
+        storage_path
     }
 
     pub fn create_account(dir: &Directory, key_pair: &KeyPair, email: &str) -> Result<String> {
