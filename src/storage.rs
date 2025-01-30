@@ -151,10 +151,22 @@ impl FileStorage {
 
         let index = Self::build_index(&file)?;
 
-        Ok(Self {
+        let storage = Self {
             index: Arc::new(RwLock::new(index)),
             file: Arc::new(RwLock::new(file)),
-        })
+        };
+
+        if storage
+            .index
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .entries
+            .is_empty()
+        {
+            storage.write_entry(Path::new("/"), &[], true)?;
+        }
+
+        Ok(storage)
     }
 
     fn build_index(file: &std::fs::File) -> Result<StorageIndex> {
