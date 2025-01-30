@@ -8,7 +8,7 @@ pub trait PayloadT: Serialize + for<'de> Deserialize<'de> {
         serde_json::to_string(self)
     }
 
-    fn to_json_base64(&self) -> Result<String, serde_json::Error> {
+    fn to_json_base64_url(&self) -> Result<String, serde_json::Error> {
         let json_string = self.to_json_string()?;
         Ok(Base64::new(json_string.as_bytes()).base64_url())
     }
