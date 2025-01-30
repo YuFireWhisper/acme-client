@@ -31,9 +31,9 @@ pub struct ProtectedHeader {
 }
 
 impl ProtectedHeader {
-    pub fn to_json_base64_url(&self) -> Result<String> {
+    pub fn to_base64(&self) -> Result<Base64> {
         let json_str = self.to_string();
-        Ok(Base64::new(json_str.as_bytes()).base64_url())
+        Ok(Base64::new(json_str.as_bytes()))
     }
 }
 

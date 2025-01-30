@@ -1,7 +1,6 @@
 use std::string::FromUtf8Error;
 
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
@@ -10,6 +9,7 @@ use crate::{
     jwk::{Jwk, JwkError},
     key_pair::KeyPair,
     nonce::Nonce,
+    payload::{NewAccountPayload, PayloadT},
     protection::{Protection, ProtectionError},
     signature::{create_signature, SignatureError},
     storage::{Storage, StorageError},
@@ -19,22 +19,24 @@ use crate::{
 pub enum AccountError {
     #[error("Request error: {0}")]
     RequestError(#[from] reqwest::Error),
-
+    #[error("Request header error: {0}")]
+    RequestHeaderError(#[from] reqwest::header::ToStrError),
+    #[error("Request failed: {status:?}, {headers:?}, {body:?}")]
+    RequestErrorDetailed {
+        status: reqwest::StatusCode,
+        headers: reqwest::header::HeaderMap,
+        body: String,
+    },
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-
     #[error("UTF-8 error: {0}")]
     Utf8Error(#[from] FromUtf8Error),
-
     #[error("Storage error: {0}")]
     StorageError(#[from] StorageError),
-
     #[error("JWK error: {0}")]
     JwkError(#[from] JwkError),
-
     #[error("Protection error: {0}")]
     ProtectionError(#[from] ProtectionError),
-
     #[error("Signature error: {0}")]
     SignatureError(#[from] SignatureError),
 }
@@ -42,7 +44,7 @@ pub enum AccountError {
 pub type Result<T> = std::result::Result<T, AccountError>;
 
 pub struct Account {
-    email: String,
+    pub email: String,
     pub account_url: String,
     pub key_pair: KeyPair,
     pub nonce: Nonce,
@@ -124,21 +126,15 @@ impl Account {
         let jwk = Jwk::new(key_pair, None)?;
         let header = Protection::new(&nonce, &key_pair.alg_name)
             .set_value(jwk)?
-            .create_header(new_account_api)?;
-        let payload = NewAccountPayload {
-            terms_of_service_agreed: true,
-            contact: vec![format!("mailto:{}", email)],
-        };
-
+            .create_header(new_account_api)?
+            .to_base64()?;
+        let payload = NewAccountPayload::new(email).to_base64()?;
         let signature = create_signature(&header, &payload, key_pair)?;
 
         let jws = serde_json::to_string(&Value::Object({
             let mut map = serde_json::Map::new();
-            map.insert("protected".to_string(), header.to_string().into());
-            map.insert(
-                "payload".to_string(),
-                serde_json::to_string(&payload)?.into(),
-            );
+            map.insert("protected".to_string(), header.base64_url().into());
+            map.insert("payload".to_string(), payload.base64_url().into());
             map.insert("signature".to_string(), signature.into());
             map
         }))?;
@@ -150,23 +146,28 @@ impl Account {
             .body(jws)
             .send()?;
 
-        let new_account_response: NewAccountResponse = response.json()?;
-        let account_url = new_account_response.orders;
+        let status = response.status();
+        if !status.is_success() {
+            let headers = response.headers().clone();
+            let body = response.text()?;
+            return Err(AccountError::RequestErrorDetailed {
+                status,
+                headers,
+                body,
+            });
+        }
+
+        let account_url = response
+            .headers()
+            .get("Location")
+            .ok_or_else(|| AccountError::RequestErrorDetailed {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: "Location header not found".to_string(),
+            })?
+            .to_str()?
+            .to_string();
 
         Ok(account_url)
     }
-}
-
-#[derive(Debug, Serialize)]
-struct NewAccountPayload {
-    terms_of_service_agreed: bool,
-    contact: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NewAccountResponse {
-    status: String,
-    contact: Vec<String>,
-    orders: String,
-    created_at: String,
 }

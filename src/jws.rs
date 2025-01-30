@@ -3,11 +3,9 @@ use std::result;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{
-    base64::{Base64, DecodeError},
-    payload::PayloadT,
-    protection::ProtectedHeader,
-};
+use crate::
+    base64::{Base64, DecodeError}
+;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Jws {
@@ -27,18 +25,16 @@ pub enum JwsError {
 type Result<T> = result::Result<T, JwsError>;
 
 impl Jws {
-    pub fn new<T: PayloadT>(
-        header: &ProtectedHeader,
-        payload: &T,
+    pub fn new(
+        header_b64: &Base64,
+        payload_b64: &Base64,
         signature: &str,
     ) -> Result<Self> {
-        let header_base64 = Base64::new(header.to_string());
-        let payload_base64 = Base64::new(payload.to_json_string()?);
         let signature_base64 = Base64::from_encoded(signature)?;
 
         Ok(Jws {
-            header: header_base64.as_str().to_string(),
-            payload: payload_base64.as_str().to_string(),
+            header: header_b64.base64_url(),
+            payload: payload_b64.base64_url(),
             signature: signature_base64.as_str().to_string(),
         })
     }

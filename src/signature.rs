@@ -1,7 +1,6 @@
 use crate::{base64::Base64, key_pair::KeyPair};
 use openssl::hash::MessageDigest;
 use openssl::sign::Signer;
-use serde::Serialize;
 use std::error::Error;
 
 #[derive(Debug)]
@@ -63,22 +62,15 @@ impl SignatureAlgorithmFactory {
     }
 }
 
-pub fn create_signature<T: Serialize, U: Serialize>(
-    header: &T,
-    payload: &U,
+pub fn create_signature(
+    header_b64: &Base64,
+    payload_b64: &Base64,
     key_pair: &KeyPair,
 ) -> Result<String, SignatureError> {
-    let header = serde_json::to_string(&header)?;
-    let payload = serde_json::to_string(&payload)?;
-
-    let header = Base64::new(header).base64_url();
-    let payload = Base64::new(payload).base64_url();
-
-    let signing_input = format!("{}.{}", header, payload);
+    let signing_input = format!("{}.{}", header_b64.base64_url(), payload_b64.base64_url());
     let algorithm = SignatureAlgorithmFactory::get_algorithm(&key_pair.alg_name)?;
 
     let signature = algorithm.sign(signing_input.as_bytes(), key_pair)?;
-    let signature_b64 = Base64::new(String::from_utf8_lossy(&signature).to_string()).base64_url();
 
-    Ok(format!("{}.{}.{}", header, payload, signature_b64))
+    Ok(Base64::new(&signature).base64_url())
 }

@@ -97,7 +97,6 @@ struct Instructions {
 
 impl Challenge {
     pub fn fetch_challenges(
-        account: &Account,
         auth_url: &str,
         thumbprint: &str,
     ) -> Vec<Result<Self>> {
@@ -146,7 +145,7 @@ impl Challenge {
     }
 
     pub fn validate(&self, account: &mut Account) -> Result<()> {
-        let payload = ChallengeValidationPayload::new();
+        let payload = ChallengeValidationPayload::new().to_base64()?;
         let jws = self.build_jws(account, &payload)?;
 
         let response = Client::new()
@@ -164,10 +163,10 @@ impl Challenge {
         Ok(())
     }
 
-    fn build_jws<T: PayloadT>(&self, account: &Account, payload: &T) -> Result<Jws> {
+    fn build_jws(&self, account: &Account, payload: &Base64) -> Result<Jws> {
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
-            .create_header(&self.url)?;
+            .create_header(&self.url)?.to_base64()?;
 
         let signature = create_signature(&header, payload, &account.key_pair)?;
         Jws::new(&header, payload, &signature).map_err(Into::into)

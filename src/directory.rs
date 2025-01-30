@@ -34,15 +34,14 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub fn new<T: Storage>(storage: &mut T, url: &str) -> DirectoryResult<Self> {
+    pub fn new<T: Storage>(storage: &T, url: &str) -> DirectoryResult<Self> {
         let storage_key = Base64::new(url.as_bytes()).base64_url();
 
         match storage.read_file(&storage_key) {
             Ok(data) => {
                 return Ok(serde_json::from_slice(&data)?);
             }
-            Err(StorageError::NotFound(_)) => { 
-            }
+            Err(StorageError::NotFound(_)) => {}
             Err(e) => {
                 return Err(DirectoryError::Storage(e));
             }
@@ -91,8 +90,8 @@ mod tests {
             .with_body(dir_json.clone())
             .create();
 
-        let mut storage = MemStorage::new();
-        let result = Directory::new(&mut storage, &url).unwrap();
+        let storage = MemStorage::new();
+        let result = Directory::new(&storage, &url).unwrap();
 
         mock.assert();
         assert_eq!(result.new_account, dir.new_account);
@@ -108,12 +107,12 @@ mod tests {
         let dir = create_test_directory();
         let dir_json = serde_json::to_vec(&dir).unwrap();
 
-        let mut storage = MemStorage::new();
+        let storage = MemStorage::new();
         storage.write_file(&storage_key, &dir_json).unwrap();
 
         let mock = server.mock("GET", "/").expect(0).create();
 
-        let result = Directory::new(&mut storage, &url).unwrap();
+        let result = Directory::new(&storage, &url).unwrap();
         mock.assert();
         assert_eq!(result.new_account, dir.new_account);
     }
@@ -125,8 +124,8 @@ mod tests {
 
         let mock = server.mock("GET", "/").with_status(500).create();
 
-        let mut storage = MemStorage::new();
-        let result = Directory::new(&mut storage, &url);
+        let storage = MemStorage::new();
+        let result = Directory::new(&storage, &url);
 
         mock.assert();
         assert!(matches!(result, Err(DirectoryError::Request(_))));
@@ -143,8 +142,8 @@ mod tests {
             .with_body("invalid json")
             .create();
 
-        let mut storage = MemStorage::new();
-        let result = Directory::new(&mut storage, &url);
+        let storage = MemStorage::new();
+        let result = Directory::new(&storage, &url);
 
         mock.assert();
         assert!(matches!(result, Err(DirectoryError::Request(_))));

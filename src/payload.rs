@@ -8,9 +8,9 @@ pub trait PayloadT: Serialize + for<'de> Deserialize<'de> {
         serde_json::to_string(self)
     }
 
-    fn to_json_base64_url(&self) -> Result<String, serde_json::Error> {
+    fn to_base64(&self) -> Result<Base64, serde_json::Error> {
         let json_string = self.to_json_string()?;
-        Ok(Base64::new(json_string.as_bytes()).base64_url())
+        Ok(Base64::new(json_string.as_bytes()))
     }
 
     fn validate(&self) -> Result<(), Box<dyn Error>>;
@@ -19,12 +19,13 @@ pub trait PayloadT: Serialize + for<'de> Deserialize<'de> {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NewAccountPayload {
     contact: Vec<String>,
+    #[serde(rename = "termsOfServiceAgreed")]
     terms_of_service_agreed: bool,
 }
 
 impl NewAccountPayload {
     pub fn new(email: &str) -> Self {
-        let contact = if email.contains("@") {
+        let contact = if email.starts_with("mailto:") {
             vec![email.to_string()]
         } else {
             vec![format!("mailto:{}", email)]

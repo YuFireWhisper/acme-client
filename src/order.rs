@@ -5,13 +5,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    account::Account,
-    challenge::{Challenge, ChallengeError, ChallengeType},
-    jws::{Jws, JwsError},
-    payload::{Identifier, NewOrderPayload},
-    protection::{Protection, ProtectionError},
-    signature::{create_signature, SignatureError},
-    storage::StorageError,
+    account::Account, base64::Base64, challenge::{Challenge, ChallengeError, ChallengeType}, jws::{Jws, JwsError}, payload::{Identifier, NewOrderPayload, PayloadT}, protection::{Protection, ProtectionError}, signature::{create_signature, SignatureError}, storage::StorageError
 };
 
 #[derive(Debug, Error)]
@@ -36,6 +30,8 @@ pub enum OrderError {
     InvalidStatus,
     #[error("Account thumbprint calculation failed")]
     ThumbprintError,
+    #[error("Serde JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 type Result<T> = std::result::Result<T, OrderError>;
@@ -95,7 +91,7 @@ impl Order {
             }
         }
 
-        let payload = NewOrderPayload::new(vec![domain]);
+        let payload = NewOrderPayload::new(vec![domain]).to_base64()?;
         let jws = Self::build_jws(account, &payload)?;
 
         let response = Client::new()
@@ -149,7 +145,7 @@ impl Order {
         self.challenges = self
             .authorizations
             .iter()
-            .flat_map(|auth_url| Challenge::fetch_challenges(account, auth_url, &thumbprint))
+            .flat_map(|auth_url| Challenge::fetch_challenges(auth_url, &thumbprint))
             .filter_map(|res| res.ok())
             .map(|c| (c.challenge_type.clone(), c))
             .collect();
@@ -157,12 +153,12 @@ impl Order {
         Ok(())
     }
 
-    fn build_jws(account: &Account, payload: &NewOrderPayload) -> Result<Jws> {
+    fn build_jws(account: &Account, payload_b64: &Base64) -> Result<Jws> {
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
-            .create_header(&account.dir.new_order)?;
+            .create_header(&account.dir.new_order)?.to_base64()?;
 
-        let signature = create_signature(&header, payload, &account.key_pair)?;
-        Jws::new(&header, payload, &signature).map_err(Into::into)
+        let signature = create_signature(&header, payload_b64, &account.key_pair)?;
+        Jws::new(&header, payload_b64, &signature).map_err(Into::into)
     }
 }
