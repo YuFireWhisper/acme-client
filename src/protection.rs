@@ -1,4 +1,4 @@
-use crate::nonce::{NonceT, NonceError};
+use crate::{base64::Base64, nonce::{NonceError, NonceT}};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use thiserror::Error;
@@ -28,6 +28,13 @@ pub struct ProtectedHeader {
     jwk: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kid: Option<String>,
+}
+
+impl ProtectedHeader {
+    pub fn to_json_base64_url(&self) -> Result<String> {
+        let json_str = self.to_string();
+        Ok(Base64::new(json_str.as_bytes()).base64_url())
+    }
 }
 
 impl<'a> Protection<'a> {
