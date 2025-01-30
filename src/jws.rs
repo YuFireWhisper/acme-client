@@ -9,6 +9,7 @@ use crate::
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Jws {
+    #[serde(rename = "protected")]
     header: String,
     payload: String,
     signature: String,
@@ -28,14 +29,12 @@ impl Jws {
     pub fn new(
         header_b64: &Base64,
         payload_b64: &Base64,
-        signature: &str,
+        signature_b64: &Base64,
     ) -> Result<Self> {
-        let signature_base64 = Base64::from_encoded(signature)?;
-
         Ok(Jws {
             header: header_b64.base64_url(),
             payload: payload_b64.base64_url(),
-            signature: signature_base64.as_str().to_string(),
+            signature: signature_b64.base64_url(),
         })
     }
 

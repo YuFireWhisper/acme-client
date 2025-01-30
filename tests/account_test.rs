@@ -1,3 +1,5 @@
+mod order_test;
+
 #[test]
 fn test_create_account() {
     let storage = acme_client::storage::FileStorage::open("/home/yuwhisper/projects/acme-client/test_storage").unwrap();

@@ -129,7 +129,7 @@ impl Account {
             .create_header(new_account_api)?
             .to_base64()?;
         let payload = NewAccountPayload::new(email).to_base64()?;
-        let signature = create_signature(&header, &payload, key_pair)?;
+        let signature = create_signature(&header, &payload, key_pair)?.base64_url();
 
         let jws = serde_json::to_string(&Value::Object({
             let mut map = serde_json::Map::new();

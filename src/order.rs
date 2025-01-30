@@ -5,7 +5,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
-    account::Account, base64::Base64, challenge::{Challenge, ChallengeError, ChallengeType}, jws::{Jws, JwsError}, payload::{Identifier, NewOrderPayload, PayloadT}, protection::{Protection, ProtectionError}, signature::{create_signature, SignatureError}, storage::StorageError
+    account::Account,
+    base64::Base64,
+    challenge::{Challenge, ChallengeError, ChallengeType},
+    jws::{Jws, JwsError},
+    payload::{Identifier, NewOrderPayload, PayloadT},
+    protection::{Protection, ProtectionError},
+    signature::{create_signature, SignatureError},
+    storage::StorageError,
 };
 
 #[derive(Debug, Error)]
@@ -22,8 +29,12 @@ pub enum OrderError {
     Storage(#[from] StorageError),
     #[error("Challenge error: {0}")]
     Challenge(#[from] ChallengeError),
-    #[error("Missing Location header")]
-    MissingLocationHeader,
+    #[error("Missing Location header: {status:?}, {headers:?}, {body:?}")]
+    MissingLocationHeader {
+        status: reqwest::StatusCode,
+        headers: reqwest::header::HeaderMap,
+        body: String,
+    },
     #[error("Invalid Location header")]
     InvalidLocationHeader,
     #[error("Invalid status value")]
@@ -32,6 +43,14 @@ pub enum OrderError {
     ThumbprintError,
     #[error("Serde JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Request header error: {0}")]
+    RequestHeaderError(#[from] reqwest::header::ToStrError),
+    #[error("Request failed: {status:?}, {headers:?}, {body:?}")]
+    RequestErrorDetailed {
+        status: reqwest::StatusCode,
+        headers: reqwest::header::HeaderMap,
+        body: String,
+    },
 }
 
 type Result<T> = std::result::Result<T, OrderError>;
@@ -100,13 +119,24 @@ impl Order {
             .body(jws.to_json()?)
             .send()?;
 
+        if !response.status().is_success() {
+            return Err(OrderError::RequestErrorDetailed {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: response.text()?,
+            });
+        }
+
         let order_url = response
             .headers()
             .get("Location")
-            .ok_or(OrderError::MissingLocationHeader)?
-            .to_str()
-            .map_err(|_| OrderError::InvalidLocationHeader)?
-            .to_owned();
+            .ok_or_else(|| OrderError::MissingLocationHeader {
+                status: response.status(),
+                headers: response.headers().clone(),
+                body: "Location header not found".to_string(),
+            })?
+            .to_str()?
+            .to_string();
 
         account
             .storage
@@ -114,7 +144,7 @@ impl Order {
 
         let mut order: Self = response.json()?;
         order.order_url = order_url.clone();
-        
+
         order.fetch_challenges(account)?;
 
         Ok(order)
@@ -141,7 +171,7 @@ impl Order {
             .key_pair
             .thumbprint()
             .map_err(|_| OrderError::ThumbprintError)?;
-            
+
         self.challenges = self
             .authorizations
             .iter()
@@ -149,14 +179,15 @@ impl Order {
             .filter_map(|res| res.ok())
             .map(|c| (c.challenge_type.clone(), c))
             .collect();
-            
+
         Ok(())
     }
 
     fn build_jws(account: &Account, payload_b64: &Base64) -> Result<Jws> {
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
-            .create_header(&account.dir.new_order)?.to_base64()?;
+            .create_header(&account.dir.new_order)?
+            .to_base64()?;
 
         let signature = create_signature(&header, payload_b64, &account.key_pair)?;
         Jws::new(&header, payload_b64, &signature).map_err(Into::into)

@@ -66,11 +66,11 @@ pub fn create_signature(
     header_b64: &Base64,
     payload_b64: &Base64,
     key_pair: &KeyPair,
-) -> Result<String, SignatureError> {
+) -> Result<Base64, SignatureError> {
     let signing_input = format!("{}.{}", header_b64.base64_url(), payload_b64.base64_url());
     let algorithm = SignatureAlgorithmFactory::get_algorithm(&key_pair.alg_name)?;
 
     let signature = algorithm.sign(signing_input.as_bytes(), key_pair)?;
 
-    Ok(Base64::new(&signature).base64_url())
+    Ok(Base64::new(&signature))
 }
