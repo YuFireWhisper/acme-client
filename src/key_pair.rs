@@ -2,9 +2,13 @@ use openssl::{
     error::ErrorStack,
     pkey::{Id, PKey, Private, Public},
     rsa::Rsa,
+    sha::sha256,
 };
 
-use crate::storage::{Storage, StorageError};
+use crate::{
+    base64::Base64,
+    storage::{Storage, StorageError},
+};
 
 #[derive(Debug)]
 pub enum KeyError {
@@ -12,6 +16,7 @@ pub enum KeyError {
     Storage(StorageError),
     UnsupportedAlgorithm,
     KeyConversionFailed,
+    ThumbprintError,
 }
 
 impl From<ErrorStack> for KeyError {
@@ -36,7 +41,11 @@ impl KeyPair {
     const KEY_PAIR_DIR: &'static str = "key_pair";
     const PRIVATE_KEY_SUFFIX: &'static str = "/private_key";
 
-    pub fn new<T: Storage>(storage: &T, alg_name: &str, bits: Option<u32>) -> Result<Self, KeyError> {
+    pub fn new<T: Storage>(
+        storage: &T,
+        alg_name: &str,
+        bits: Option<u32>,
+    ) -> Result<Self, KeyError> {
         let alg_name = Self::normalize_algorithm_name(alg_name)?;
         let key_path = format!(
             "{}/{}{}",
@@ -101,5 +110,17 @@ impl KeyPair {
             _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
-}
 
+    pub fn thumbprint(&self) -> Result<String, KeyError> {
+        let pub_key_der = self
+            .pub_key
+            .public_key_to_der()
+            .map_err(|_| KeyError::ThumbprintError)?;
+
+        let hash = sha256(&pub_key_der);
+
+        let base64_thumbprint = Base64::new(hash);
+
+        Ok(base64_thumbprint.base64_url())
+    }
+}
