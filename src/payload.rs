@@ -86,3 +86,18 @@ impl PayloadT for NewOrderPayload {
         Ok(())
     }
 }
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct ChallengeValidationPayload {}
+
+impl ChallengeValidationPayload {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl PayloadT for ChallengeValidationPayload {
+    fn validate(&self) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+}

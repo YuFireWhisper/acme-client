@@ -1,4 +1,4 @@
-use std::{result, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::{
     account::Account,
-    challenge::Challenge,
+    challenge::{Challenge, ChallengeError, ChallengeType},
     jws::{Jws, JwsError},
     payload::{Identifier, NewOrderPayload},
     protection::{Protection, ProtectionError},
@@ -26,15 +26,19 @@ pub enum OrderError {
     Jws(#[from] JwsError),
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
+    #[error("Challenge error: {0}")]
+    Challenge(#[from] ChallengeError),
     #[error("Missing Location header")]
     MissingLocationHeader,
     #[error("Invalid Location header")]
     InvalidLocationHeader,
     #[error("Invalid status value")]
     InvalidStatus,
+    #[error("Account thumbprint calculation failed")]
+    ThumbprintError,
 }
 
-type Result<T> = result::Result<T, OrderError>;
+type Result<T> = std::result::Result<T, OrderError>;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -73,17 +77,18 @@ pub struct Order {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub certificate: Option<String>,
     #[serde(skip)]
-    pub challenges: Vec<Challenge>,
+    pub challenges: HashMap<ChallengeType, Challenge>,
 }
 
 impl Order {
-    pub fn new(account: &Account, domain: &str) -> Result<Self> {
+    pub fn new(account: &mut Account, domain: &str) -> Result<Self> {
         let order_storage_path = format!("{}{}", account.storage_path, domain);
 
         if let Ok(order_url_bytes) = account.storage.read_file(&order_storage_path) {
             if let Ok(order_url) = String::from_utf8(order_url_bytes) {
-                if let Ok(order) = Self::get_order(&order_url) {
-                    if order.status == OrderStatus::Valid {
+                if let Ok(mut order) = Self::get_order(&order_url) {
+                    if order.status != OrderStatus::Invalid {
+                        order.fetch_challenges(account)?;
                         return Ok(order);
                     }
                 }
@@ -91,7 +96,7 @@ impl Order {
         }
 
         let payload = NewOrderPayload::new(vec![domain]);
-        let jws = Self::build_jws(account, payload)?;
+        let jws = Self::build_jws(account, &payload)?;
 
         let response = Client::new()
             .post(&account.dir.new_order)
@@ -112,16 +117,15 @@ impl Order {
             .write_file(&order_storage_path, order_url.as_bytes())?;
 
         let mut order: Self = response.json()?;
-        order.order_url = order_url;
-
-        order.challenges = order
-            .authorizations
-            .iter()
-            .filter_map(|auth_url| Challenge::from_url(auth_url).ok())
-            .flatten()
-            .collect();
+        order.order_url = order_url.clone();
+        
+        order.fetch_challenges(account)?;
 
         Ok(order)
+    }
+
+    pub fn get_challenge(&self, challenge_type: ChallengeType) -> Option<&Challenge> {
+        self.challenges.get(&challenge_type)
     }
 
     fn get_order(order_url: &str) -> Result<Self> {
@@ -136,12 +140,29 @@ impl Order {
         Ok(order)
     }
 
-    fn build_jws(account: &Account, payload: NewOrderPayload) -> Result<Jws> {
+    fn fetch_challenges(&mut self, account: &Account) -> Result<()> {
+        let thumbprint = account
+            .key_pair
+            .thumbprint()
+            .map_err(|_| OrderError::ThumbprintError)?;
+            
+        self.challenges = self
+            .authorizations
+            .iter()
+            .flat_map(|auth_url| Challenge::fetch_challenges(account, auth_url, &thumbprint))
+            .filter_map(|res| res.ok())
+            .map(|c| (c.challenge_type.clone(), c))
+            .collect();
+            
+        Ok(())
+    }
+
+    fn build_jws(account: &Account, payload: &NewOrderPayload) -> Result<Jws> {
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
             .create_header(&account.dir.new_order)?;
 
-        let signature = create_signature(&header, &payload, &account.key_pair)?;
-        Jws::new(&header, &payload, &signature).map_err(Into::into)
+        let signature = create_signature(&header, payload, &account.key_pair)?;
+        Jws::new(&header, payload, &signature).map_err(Into::into)
     }
 }
