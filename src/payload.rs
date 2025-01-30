@@ -1,36 +1,43 @@
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 
+use crate::base64::Base64;
+
 pub trait PayloadT: Serialize + for<'de> Deserialize<'de> {
     fn to_json_string(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
+    }
+
+    fn to_json_base64(&self) -> Result<String, serde_json::Error> {
+        let json_string = self.to_json_string()?;
+        Ok(Base64::new(json_string.as_bytes()).base64_url())
     }
 
     fn validate(&self) -> Result<(), Box<dyn Error>>;
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AccountPayload {
+pub struct NewAccountPayload {
     contact: Vec<String>,
     terms_of_service_agreed: bool,
 }
 
-impl AccountPayload {
-    pub fn new(email: &str, terms_agreed: bool) -> Self {
+impl NewAccountPayload {
+    pub fn new(email: &str) -> Self {
         let contact = if email.contains("@") {
             vec![email.to_string()]
         } else {
             vec![format!("mailto:{}", email)]
         };
 
-        AccountPayload {
+        NewAccountPayload {
             contact,
-            terms_of_service_agreed: terms_agreed,
+            terms_of_service_agreed: true,
         }
     }
 }
 
-impl PayloadT for AccountPayload {
+impl PayloadT for NewAccountPayload {
     fn validate(&self) -> Result<(), Box<dyn Error>> {
         if self.contact.is_empty() {
             return Err("Contact information is required".into());
