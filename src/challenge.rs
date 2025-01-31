@@ -9,7 +9,7 @@ use crate::{
     account::Account,
     base64::Base64,
     jws::{Jws, JwsError},
-    payload::{ChallengeValidationPayload, Identifier, PayloadT},
+    payload::{ChallengeValidationPayload, PayloadT},
     protection::{Protection, ProtectionError},
     signature::{create_signature, SignatureError},
 };
@@ -28,6 +28,14 @@ pub enum ChallengeError {
     Signature(#[from] SignatureError),
     #[error("Unsupported challenge type: {0}")]
     UnsupportedType(String),
+    #[error("Invalid challenge status: {0}")]
+    InvalidStatus(String),
+    #[error("Challenge in invalid state: {0:?}")]
+    InvalidState(ChallengeStatus),
+    #[error("Validation failed: {0}")]
+    ValidationFailed(String),
+    #[error("Authorization response parsing failed")]
+    AuthorizationParseError,
 }
 
 type Result<T> = std::result::Result<T, ChallengeError>;
@@ -58,29 +66,57 @@ impl ChallengeType {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChallengeStatus {
+    Pending,
+    Valid,
+    Invalid,
+    Deactivated,
+    Expired,
+}
+
+impl ChallengeStatus {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "pending" => Some(Self::Pending),
+            "valid" => Some(Self::Valid),
+            "invalid" => Some(Self::Invalid),
+            "deactivated" => Some(Self::Deactivated),
+            "expired" => Some(Self::Expired),
+            _ => None,
+        }
+    }
+
+    pub fn is_terminal(&self) -> bool {
+        matches!(
+            self,
+            Self::Valid | Self::Invalid | Self::Deactivated | Self::Expired
+        )
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Valid => "valid",
+            Self::Invalid => "invalid",
+            Self::Deactivated => "deactivated",
+            Self::Expired => "expired",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Challenge {
     pub challenge_type: ChallengeType,
     pub url: String,
     pub token: String,
-    pub status: String,
+    pub status: ChallengeStatus,
     pub validated: Option<String>,
     pub key_authorization: String,
-    validation_records: Vec<ValidationRecord>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-struct ValidationRecord {
-    hostname: String,
-    port: Option<String>,
-    addresses: Vec<String>,
 }
 
 #[derive(Deserialize)]
 struct AuthorizationResponse {
-    identifier: Identifier,
-    status: String,
-    expires: String,
     challenges: Vec<ChallengeResponse>,
 }
 
@@ -92,8 +128,20 @@ struct ChallengeResponse {
     token: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     validated: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ChallengeUpdateResponse {
+    status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    validation_records: Option<Vec<ValidationRecord>>,
+    error: Option<ApiError>,
+}
+
+#[derive(Deserialize)]
+struct ApiError {
+    #[serde(rename = "type")]
+    error_type: String,
+    detail: String,
 }
 
 static INSTRUCTIONS: OnceLock<HashMap<&'static str, Instructions>> = OnceLock::new();
@@ -105,59 +153,56 @@ struct Instructions {
 }
 
 impl Challenge {
-    pub fn fetch_challenges(auth_url: &str, thumbprint: &str) -> Vec<Result<Self>> {
-        let response = match Client::new()
+    pub fn fetch_challenges(auth_url: &str, thumbprint: &str) -> Result<Vec<Self>> {
+        let response = Client::new()
             .get(auth_url)
             .header("Content-Type", "application/jose+json")
             .send()
-        {
-            Ok(r) => r,
-            Err(e) => return vec![Err(e.into())],
-        };
+            .map_err(ChallengeError::Request)?;
 
         if !response.status().is_success() {
-            return vec![Err(ChallengeError::Request(
+            return Err(ChallengeError::Request(
                 response.error_for_status().unwrap_err(),
-            ))];
+            ));
         }
 
-        let json = match response.text() {
-            Ok(j) => j,
-            Err(e) => return vec![Err(e.into())],
-        };
-
-        Self::parse_challenges(&json, thumbprint)
+        let response_body = response.text().map_err(ChallengeError::Request)?;
+        Self::parse_challenges(&response_body, thumbprint)
     }
 
-    pub fn parse_challenges(json: &str, thumbprint: &str) -> Vec<Result<Self>> {
-        let response: AuthorizationResponse = match serde_json::from_str(json) {
-            Ok(r) => r,
-            Err(e) => return vec![Err(e.into())],
-        };
+    pub fn parse_challenges(json: &str, thumbprint: &str) -> Result<Vec<Self>> {
+        let response: AuthorizationResponse =
+            serde_json::from_str(json).map_err(ChallengeError::Json)?;
 
-        response
-            .challenges
-            .into_iter()
-            .map(|resp| {
-                let challenge_type = ChallengeType::from_str(&resp.r#type)
-                    .ok_or_else(|| ChallengeError::UnsupportedType(resp.r#type.clone()))?;
+        let mut challenges = Vec::new();
 
-                let key_authorization = format!("{}.{}", resp.token, thumbprint);
+        for resp in response.challenges {
+            let challenge_type = ChallengeType::from_str(&resp.r#type)
+                .ok_or_else(|| ChallengeError::UnsupportedType(resp.r#type.clone()))?;
 
-                Ok(Self {
-                    challenge_type,
-                    url: resp.url,
-                    token: resp.token,
-                    status: resp.status,
-                    validated: resp.validated,
-                    key_authorization,
-                    validation_records: resp.validation_records.unwrap_or_default(),
-                })
-            })
-            .collect()
+            let status = ChallengeStatus::from_str(&resp.status)
+                .ok_or_else(|| ChallengeError::InvalidStatus(resp.status.clone()))?;
+
+            let key_authorization = format!("{}.{}", resp.token, thumbprint);
+
+            challenges.push(Self {
+                challenge_type,
+                url: resp.url,
+                token: resp.token,
+                status,
+                validated: resp.validated,
+                key_authorization,
+            });
+        }
+
+        Ok(challenges)
     }
 
-    pub fn validate(&self, account: &mut Account) -> Result<()> {
+    pub fn validate(&mut self, account: &mut Account) -> Result<()> {
+        if self.status.is_terminal() {
+            return Err(ChallengeError::InvalidState(self.status.clone()));
+        }
+
         let payload = ChallengeValidationPayload::new().to_base64()?;
         let jws = self.build_jws(account, &payload)?;
 
@@ -167,13 +212,20 @@ impl Challenge {
             .body(jws.to_json()?)
             .send()?;
 
-        if !response.status().is_success() {
-            return Err(ChallengeError::Request(
-                response.error_for_status().unwrap_err(),
-            ));
-        }
+        let status_code = response.status();
+        let response_body = response.text()?;
 
-        println!("Response: {:#?}", response);
+        let update: ChallengeUpdateResponse = serde_json::from_str(&response_body)?;
+        self.status = ChallengeStatus::from_str(&update.status)
+            .ok_or_else(|| ChallengeError::InvalidStatus(update.status.clone()))?;
+
+        if !status_code.is_success() {
+            let error_detail = update
+                .error
+                .map(|e| format!("{}: {}", e.error_type, e.detail))
+                .unwrap_or_else(|| "Unknown API error".to_string());
+            return Err(ChallengeError::ValidationFailed(error_detail));
+        }
 
         Ok(())
     }
@@ -212,15 +264,9 @@ impl Challenge {
     }
 
     pub fn dns_txt_value(&self) -> String {
-        println!("Token: {}", self.token);
-        println!("Key Authorization: {}", self.key_authorization);
-
         let digest = hash(MessageDigest::sha256(), self.key_authorization.as_bytes())
             .expect("SHA-256 hashing failed");
-        let result = Base64::new(digest).base64_url();
-
-        println!("Calculated DNS TXT value: {}", result);
-        result
+        Base64::new(digest).base64_url()
     }
 
     pub fn http_content(&self) -> Option<&str> {

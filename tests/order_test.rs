@@ -19,7 +19,7 @@ fn get_account() -> Account {
 #[test]
 fn test_new_order() {
     let mut account = get_account();
-    let order = Order::new(&mut account, "xiuzhe.xyz").unwrap();
+    let mut order = Order::new(&mut account, "xiuzhe.xyz").unwrap();
 
     assert_ne!(order.order_url, "");
 
@@ -36,9 +36,7 @@ fn test_new_order() {
 #[test]
 fn test_validate_challenge() {
     let mut account = get_account();
-    let order = Order::new(&mut account, "xiuzhe.xyz").unwrap();
-
+    let mut order = Order::new(&mut account, "xiuzhe.xyz").unwrap();
     let challenge = order.get_challenge(ChallengeType::Dns01).unwrap();
-
     challenge.validate(&mut account).unwrap();
 }

@@ -150,8 +150,8 @@ impl Order {
         Ok(order)
     }
 
-    pub fn get_challenge(&self, challenge_type: ChallengeType) -> Option<&Challenge> {
-        self.challenges.get(&challenge_type)
+    pub fn get_challenge(&mut self, challenge_type: ChallengeType) -> Option<&mut Challenge> {
+        self.challenges.get_mut(&challenge_type)
     }
 
     fn get_order(order_url: &str) -> Result<Self> {
@@ -172,17 +172,15 @@ impl Order {
             .thumbprint()
             .map_err(|_| OrderError::ThumbprintError)?;
 
-        println!("Authorizations: {:?}", self.authorizations);
-        println!("Thumbprint: {:?}", thumbprint);
-
         self.challenges = self
             .authorizations
             .iter()
             .flat_map(|auth_url| {
-                println!("Fetching challenges from: {}", auth_url);
-                Challenge::fetch_challenges(auth_url, &thumbprint)
+                match Challenge::fetch_challenges(auth_url, &thumbprint) {
+                    Ok(challenges) => challenges.into_iter(),
+                    Err(_) => Vec::new().into_iter(),
+                }
             })
-            .filter_map(|res| res.ok())
             .map(|c| (c.challenge_type.clone(), c))
             .collect();
 
