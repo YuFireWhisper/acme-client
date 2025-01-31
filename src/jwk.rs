@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 use crate::{base64::Base64, key_pair::KeyPair};
@@ -43,6 +44,15 @@ impl RsaJwk {
 
         Ok(RsaJwk { n, e, kid, alg })
     }
+
+    pub fn to_acme_json(&self) -> Result<String, JwkError> {
+        let mut map = Map::new();
+        map.insert("e".to_string(), Value::String(self.e.clone()));
+        map.insert("kty".to_string(), Value::String("RSA".to_string()));
+        map.insert("n".to_string(), Value::String(self.n.clone()));
+
+        serde_json::to_string(&Value::Object(map)).map_err(JwkError::from)
+    }
 }
 
 impl Jwk {
@@ -62,6 +72,16 @@ impl Jwk {
     pub fn algorithm(&self) -> Option<&str> {
         match self {
             Jwk::Rsa(jwk) => jwk.alg.as_deref(),
+        }
+    }
+
+    pub fn to_json(&self) -> Result<String, JwkError> {
+        serde_json::to_string(self).map_err(JwkError::from)
+    }
+
+    pub fn to_acme_json(&self) -> Result<String, JwkError> {
+        match self {
+            Jwk::Rsa(jwk) => jwk.to_acme_json(),
         }
     }
 }

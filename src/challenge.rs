@@ -9,7 +9,7 @@ use crate::{
     account::Account,
     base64::Base64,
     jws::{Jws, JwsError},
-    payload::{ChallengeValidationPayload, PayloadT},
+    payload::{ChallengeValidationPayload, Identifier, PayloadT},
     protection::{Protection, ProtectionError},
     signature::{create_signature, SignatureError},
 };
@@ -76,14 +76,23 @@ struct ValidationRecord {
     addresses: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
+struct AuthorizationResponse {
+    identifier: Identifier,
+    status: String,
+    expires: String,
+    challenges: Vec<ChallengeResponse>,
+}
+
+#[derive(Deserialize)]
 struct ChallengeResponse {
-    #[serde(rename = "type")]
-    challenge_type: String,
+    r#type: String,
     url: String,
     status: String,
     token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     validated: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     validation_records: Option<Vec<ValidationRecord>>,
 }
 
@@ -96,18 +105,21 @@ struct Instructions {
 }
 
 impl Challenge {
-    pub fn fetch_challenges(
-        auth_url: &str,
-        thumbprint: &str,
-    ) -> Vec<Result<Self>> {
+    pub fn fetch_challenges(auth_url: &str, thumbprint: &str) -> Vec<Result<Self>> {
         let response = match Client::new()
             .get(auth_url)
-            .header("Content-Type", "application/json")
+            .header("Content-Type", "application/jose+json")
             .send()
         {
             Ok(r) => r,
             Err(e) => return vec![Err(e.into())],
         };
+
+        if !response.status().is_success() {
+            return vec![Err(ChallengeError::Request(
+                response.error_for_status().unwrap_err(),
+            ))];
+        }
 
         let json = match response.text() {
             Ok(j) => j,
@@ -118,16 +130,17 @@ impl Challenge {
     }
 
     pub fn parse_challenges(json: &str, thumbprint: &str) -> Vec<Result<Self>> {
-        let responses: Vec<ChallengeResponse> = match serde_json::from_str(json) {
+        let response: AuthorizationResponse = match serde_json::from_str(json) {
             Ok(r) => r,
             Err(e) => return vec![Err(e.into())],
         };
 
-        responses
+        response
+            .challenges
             .into_iter()
             .map(|resp| {
-                let challenge_type = ChallengeType::from_str(&resp.challenge_type)
-                    .ok_or_else(|| ChallengeError::UnsupportedType(resp.challenge_type.clone()))?;
+                let challenge_type = ChallengeType::from_str(&resp.r#type)
+                    .ok_or_else(|| ChallengeError::UnsupportedType(resp.r#type.clone()))?;
 
                 let key_authorization = format!("{}.{}", resp.token, thumbprint);
 
@@ -160,13 +173,16 @@ impl Challenge {
             ));
         }
 
+        println!("Response: {:#?}", response);
+
         Ok(())
     }
 
     fn build_jws(&self, account: &Account, payload: &Base64) -> Result<Jws> {
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
-            .create_header(&self.url)?.to_base64()?;
+            .create_header(&self.url)?
+            .to_base64()?;
 
         let signature = create_signature(&header, payload, &account.key_pair)?;
         Jws::new(&header, payload, &signature).map_err(Into::into)
@@ -196,9 +212,15 @@ impl Challenge {
     }
 
     pub fn dns_txt_value(&self) -> String {
+        println!("Token: {}", self.token);
+        println!("Key Authorization: {}", self.key_authorization);
+
         let digest = hash(MessageDigest::sha256(), self.key_authorization.as_bytes())
             .expect("SHA-256 hashing failed");
-        Base64::new(digest).base64_url()
+        let result = Base64::new(digest).base64_url();
+
+        println!("Calculated DNS TXT value: {}", result);
+        result
     }
 
     pub fn http_content(&self) -> Option<&str> {

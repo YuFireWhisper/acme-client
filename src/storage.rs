@@ -144,9 +144,8 @@ impl FileStorage {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = std::fs::OpenOptions::new()
             .read(true)
-            .write(true)
             .create(true)
-            .truncate(true)
+            .append(true)
             .open(path)?;
 
         let index = Self::build_index(&file)?;

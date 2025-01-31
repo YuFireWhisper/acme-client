@@ -7,6 +7,7 @@ use openssl::{
 
 use crate::{
     base64::Base64,
+    jwk::{Jwk, JwkError},
     storage::{Storage, StorageError},
 };
 
@@ -17,6 +18,7 @@ pub enum KeyError {
     UnsupportedAlgorithm,
     KeyConversionFailed,
     ThumbprintError,
+    JwkError,
 }
 
 impl From<ErrorStack> for KeyError {
@@ -28,6 +30,12 @@ impl From<ErrorStack> for KeyError {
 impl From<StorageError> for KeyError {
     fn from(error: StorageError) -> Self {
         KeyError::Storage(error)
+    }
+}
+
+impl From<JwkError> for KeyError {
+    fn from(_: JwkError) -> Self {
+        KeyError::JwkError
     }
 }
 
@@ -112,15 +120,9 @@ impl KeyPair {
     }
 
     pub fn thumbprint(&self) -> Result<String, KeyError> {
-        let pub_key_der = self
-            .pub_key
-            .public_key_to_der()
-            .map_err(|_| KeyError::ThumbprintError)?;
-
-        let hash = sha256(&pub_key_der);
-
-        let base64_thumbprint = Base64::new(hash);
-
-        Ok(base64_thumbprint.base64_url())
+        let jwk = Jwk::new(self, None)?;
+        println!("{:?}", jwk.to_acme_json()?);
+        let hash = sha256(jwk.to_acme_json()?.as_bytes());
+        Ok(Base64::new(hash).base64_url())
     }
 }

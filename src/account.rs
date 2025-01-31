@@ -109,8 +109,9 @@ impl Account {
 
     fn get_storage_path(email: &str) -> String {
         let mut storage_path = String::with_capacity(
-            Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
+            1 + Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
         );
+        storage_path.push('/');
         storage_path.push_str(Self::ACCOUNT_DIR);
         storage_path.push('/');
         storage_path.push_str(email);
