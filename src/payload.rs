@@ -109,3 +109,23 @@ impl PayloadT for ChallengeValidationPayload {
         Ok(())
     }
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FinalizeOrderPayload {
+    #[serde(rename = "csr")]
+    csr_b64_str: String,
+}
+
+impl FinalizeOrderPayload {
+    pub fn new(csr_b64: &Base64) -> Self {
+        FinalizeOrderPayload {
+            csr_b64_str: csr_b64.base64_url(),
+        }
+    }
+}
+
+impl PayloadT for FinalizeOrderPayload {
+    fn validate(&self) -> Result<(), Box<dyn Error>> {
+        Ok(())
+    }
+}

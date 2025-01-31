@@ -88,10 +88,7 @@ impl ChallengeStatus {
     }
 
     pub fn is_terminal(&self) -> bool {
-        matches!(
-            self,
-            Self::Valid | Self::Invalid | Self::Deactivated | Self::Expired
-        )
+        matches!(self, Self::Invalid | Self::Deactivated | Self::Expired)
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -199,6 +196,10 @@ impl Challenge {
     }
 
     pub fn validate(&mut self, account: &mut Account) -> Result<()> {
+        if self.status == ChallengeStatus::Valid {
+            return Ok(());
+        }
+
         if self.status.is_terminal() {
             return Err(ChallengeError::InvalidState(self.status.clone()));
         }

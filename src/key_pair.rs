@@ -4,6 +4,7 @@ use openssl::{
     rsa::Rsa,
     sha::sha256,
 };
+use thiserror::Error;
 
 use crate::{
     base64::Base64,
@@ -11,32 +12,20 @@ use crate::{
     storage::{Storage, StorageError},
 };
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum KeyError {
-    OpenSsl(ErrorStack),
-    Storage(StorageError),
+    #[error("OpenSSL error: {0}")]
+    OpenSSL(#[from] ErrorStack),
+    #[error("Storage error: {0}")]
+    Storage(#[from] StorageError),
+    #[error("Unsupported algorithm")]
     UnsupportedAlgorithm,
+    #[error("JWK error")]
     KeyConversionFailed,
+    #[error("Thumbprint error")]
     ThumbprintError,
-    JwkError,
-}
-
-impl From<ErrorStack> for KeyError {
-    fn from(error: ErrorStack) -> Self {
-        KeyError::OpenSsl(error)
-    }
-}
-
-impl From<StorageError> for KeyError {
-    fn from(error: StorageError) -> Self {
-        KeyError::Storage(error)
-    }
-}
-
-impl From<JwkError> for KeyError {
-    fn from(_: JwkError) -> Self {
-        KeyError::JwkError
-    }
+    #[error("JWK error")]
+    JwkError(#[from] JwkError),
 }
 
 pub struct KeyPair {
@@ -46,23 +35,27 @@ pub struct KeyPair {
 }
 
 impl KeyPair {
-    const KEY_PAIR_DIR: &'static str = "key_pair";
-    const PRIVATE_KEY_SUFFIX: &'static str = "/private_key";
-
-    pub fn new<T: Storage>(
-        storage: &T,
+    pub fn new(
+        storage: &dyn Storage,
         alg_name: &str,
         bits: Option<u32>,
+        path: Option<&str>,
     ) -> Result<Self, KeyError> {
         let alg_name = Self::normalize_algorithm_name(alg_name)?;
-        let key_path = format!(
-            "{}/{}{}",
-            Self::KEY_PAIR_DIR,
-            &alg_name,
-            Self::PRIVATE_KEY_SUFFIX
-        );
 
-        match storage.read_file(&key_path) {
+        if path.is_none() {
+            let pri_key = Self::generate_key(&alg_name, bits)?;
+            let pub_key = Self::derive_public_key(&pri_key)?;
+
+            return Ok(Self {
+                alg_name,
+                pri_key,
+                pub_key,
+            });
+        }
+
+        let path = path.unwrap();
+        match storage.read_file(path) {
             Ok(pri_key_data) => {
                 let pri_key = PKey::private_key_from_pem(&pri_key_data)?;
                 let pub_key = Self::derive_public_key(&pri_key)?;
@@ -81,7 +74,7 @@ impl KeyPair {
         let pri_key = Self::generate_key(&alg_name, bits)?;
         let pub_key = Self::derive_public_key(&pri_key)?;
 
-        storage.write_file(&key_path, &pri_key.private_key_to_pem_pkcs8()?)?;
+        storage.write_file(path, &pri_key.private_key_to_pem_pkcs8()?)?;
 
         Ok(Self {
             alg_name,
