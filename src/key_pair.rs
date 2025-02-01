@@ -28,6 +28,8 @@ pub enum KeyError {
     JwkError(#[from] JwkError),
 }
 
+type Result<T> = std::result::Result<T, KeyError>;
+
 pub struct KeyPair {
     pub alg_name: String,
     pub pri_key: PKey<Private>,
@@ -40,7 +42,7 @@ impl KeyPair {
         alg_name: &str,
         bits: Option<u32>,
         path: Option<&str>,
-    ) -> Result<Self, KeyError> {
+    ) -> Result<Self> {
         let alg_name = Self::normalize_algorithm_name(alg_name)?;
 
         if path.is_none() {
@@ -83,14 +85,14 @@ impl KeyPair {
         })
     }
 
-    fn normalize_algorithm_name(name: &str) -> Result<String, KeyError> {
+    fn normalize_algorithm_name(name: &str) -> Result<String> {
         match name.to_uppercase().as_str() {
             "RSA" => Ok("RSA".to_owned()),
             _ => Err(KeyError::UnsupportedAlgorithm),
         }
     }
 
-    fn derive_public_key(pri_key: &PKey<Private>) -> Result<PKey<Public>, KeyError> {
+    fn derive_public_key(pri_key: &PKey<Private>) -> Result<PKey<Public>> {
         match pri_key.id() {
             Id::RSA => {
                 let rsa = pri_key.rsa()?;
@@ -102,7 +104,7 @@ impl KeyPair {
         }
     }
 
-    fn generate_key(alg_name: &str, bits: Option<u32>) -> Result<PKey<Private>, KeyError> {
+    fn generate_key(alg_name: &str, bits: Option<u32>) -> Result<PKey<Private>> {
         match alg_name {
             "RSA" => {
                 let rsa = Rsa::generate(bits.unwrap_or(2048))?;
@@ -112,14 +114,14 @@ impl KeyPair {
         }
     }
 
-    pub fn thumbprint(&self) -> Result<String, KeyError> {
+    pub fn thumbprint(&self) -> Result<String> {
         let jwk = Jwk::new(self, None)?;
         println!("{:?}", jwk.to_acme_json()?);
         let hash = sha256(jwk.to_acme_json()?.as_bytes());
         Ok(Base64::new(hash).base64_url())
     }
 
-    pub fn from_pem(pri_key_pem: &[u8]) -> Result<Self, KeyError> {
+    pub fn from_pem(pri_key_pem: &[u8]) -> Result<Self> {
         let pri_key = PKey::private_key_from_pem(pri_key_pem)?;
         let pub_key = Self::derive_public_key(&pri_key)?;
 
@@ -130,8 +132,18 @@ impl KeyPair {
         })
     }
 
-    pub fn from_file(storage: &dyn Storage, path: &str) -> Result<Self, KeyError> {
+    pub fn from_file(storage: &dyn Storage, path: &str) -> Result<Self> {
         let pri_key_data = storage.read_file(path)?;
         Self::from_pem(&pri_key_data)
+    }
+
+    pub fn key_parameters(&self) -> Result<u32> {
+        match self.pri_key.id() {
+            Id::RSA => {
+                let rsa = self.pri_key.rsa()?;
+                Ok(rsa.size() * 8)
+            }
+            _ => Err(KeyError::UnsupportedAlgorithm),
+        }
     }
 }
