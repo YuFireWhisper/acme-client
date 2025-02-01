@@ -4,7 +4,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use reqwest::blocking::Client;
+use reqwest::{blocking::Client, Certificate};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -245,7 +245,7 @@ impl Order {
         Ok(self)
     }
 
-    pub fn download_certificate(&self, account: &Account) -> Result<()> {
+    pub fn download_certificate(&self, account: &Account) -> Result<Certificate> {
         let cert_storage_path = format!("{}/{}/cert", &account.email, &self.domain);
 
         if self.status == OrderStatus::Processing {
@@ -279,7 +279,7 @@ impl Order {
             .storage
             .write_file(&cert_storage_path, &cert_bytes)?;
 
-        Ok(())
+        Ok(Certificate::from_pem(&cert_bytes)?)
     }
 
     pub fn validate_challenge(

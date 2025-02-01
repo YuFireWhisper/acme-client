@@ -17,7 +17,7 @@ pub enum CertificateError {
 type Result<T> = std::result::Result<T, CertificateError>;
 
 pub struct Certificate {
-    cert: X509,
+    pub cert: X509,
 }
 
 impl Certificate {
