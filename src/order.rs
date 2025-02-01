@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, str::FromStr};
+use std::{collections::HashMap, str::FromStr};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
@@ -113,7 +113,7 @@ pub struct Order {
 
 impl Order {
     pub fn new(account: &mut Account, domain: &str) -> Result<Self> {
-        let order_storage_path = format!("{}{}", account.storage_path, domain);
+        let order_storage_path = format!("{}/{}/order_url", &account.email, domain);
 
         if let Ok(order_url_bytes) = account.storage.read_file(&order_storage_path) {
             if let Ok(order_url) = String::from_utf8(order_url_bytes) {
@@ -227,14 +227,9 @@ impl Order {
             return Err(OrderError::OrderNotReady);
         }
 
-        println!("Domain: {}", self.domain);
-
-        let mut key_pair_storage_path = PathBuf::from(&account.storage_path);
-        key_pair_storage_path.push("cert_key_pair");
-        let key_pair_storage_path = key_pair_storage_path.to_str().unwrap();
-
+        let cert_key_storage_path = format!("{}/{}/cert_key", &account.email, &self.domain);
         let cert_key_pair =
-            KeyPair::new(&*account.storage, "RSA", None, Some(key_pair_storage_path))?;
+            KeyPair::new(&*account.storage, "RSA", None, Some(&cert_key_storage_path))?;
 
         let csr = Base64::new(
             CSR::new()?

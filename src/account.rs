@@ -50,25 +50,20 @@ pub struct Account {
     pub nonce: Nonce,
     pub dir: Directory,
     pub storage: Box<dyn Storage>,
-    pub storage_path: String,
 }
 
 impl Account {
-    const ACCOUNT_DIR: &'static str = "account";
-    const ACCOUNT_URL: &'static str = "account_url";
-
     pub fn new<T: Storage + 'static>(
         storage: Box<T>,
         dir: Directory,
         key_pair: KeyPair,
         email: &str,
     ) -> Result<Self> {
-        let account_url_path = Account::get_account_url_path(email);
-        let account_url_path = account_url_path.as_str();
+        let account_url_path = format!("{}/account_url", email);
 
         let nonce = Nonce::new(&dir.new_nonce);
 
-        if let Ok(account_url) = storage.read_file(account_url_path) {
+        if let Ok(account_url) = storage.read_file(&account_url_path) {
             return Ok(Account {
                 email: email.to_string(),
                 account_url: String::from_utf8(account_url)?,
@@ -76,12 +71,11 @@ impl Account {
                 nonce,
                 dir,
                 storage,
-                storage_path: Self::get_storage_path(email),
             });
         }
 
         let account_url = Account::create_account(&dir, &key_pair, email)?;
-        storage.write_file(account_url_path, account_url.as_bytes())?;
+        storage.write_file(&account_url_path, account_url.as_bytes())?;
 
         Ok(Account {
             email: email.to_string(),
@@ -90,34 +84,7 @@ impl Account {
             nonce,
             dir,
             storage,
-            storage_path: Self::get_storage_path(email),
         })
-    }
-
-    fn get_account_url_path(email: &str) -> String {
-        let mut account_url_path = String::with_capacity(
-            Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
-        );
-        account_url_path.push_str(Self::ACCOUNT_DIR);
-        account_url_path.push('/');
-        account_url_path.push_str(email);
-        account_url_path.push('/');
-        account_url_path.push_str(Self::ACCOUNT_URL);
-
-        account_url_path
-    }
-
-    fn get_storage_path(email: &str) -> String {
-        let mut storage_path = String::with_capacity(
-            1 + Self::ACCOUNT_DIR.len() + email.len() + Self::ACCOUNT_URL.len() + 2,
-        );
-        storage_path.push('/');
-        storage_path.push_str(Self::ACCOUNT_DIR);
-        storage_path.push('/');
-        storage_path.push_str(email);
-        storage_path.push('/');
-
-        storage_path
     }
 
     pub fn create_account(dir: &Directory, key_pair: &KeyPair, email: &str) -> Result<String> {
