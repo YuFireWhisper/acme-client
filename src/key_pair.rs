@@ -118,4 +118,15 @@ impl KeyPair {
         let hash = sha256(jwk.to_acme_json()?.as_bytes());
         Ok(Base64::new(hash).base64_url())
     }
+
+    pub fn from_pem(pri_key_pem: &[u8]) -> Result<Self, KeyError> {
+        let pri_key = PKey::private_key_from_pem(pri_key_pem)?;
+        let pub_key = Self::derive_public_key(&pri_key)?;
+
+        Ok(Self {
+            alg_name: "RSA".to_owned(),
+            pri_key,
+            pub_key,
+        })
+    }
 }
