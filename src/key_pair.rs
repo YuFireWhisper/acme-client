@@ -129,4 +129,9 @@ impl KeyPair {
             pub_key,
         })
     }
+
+    pub fn from_file(storage: &dyn Storage, path: &str) -> Result<Self, KeyError> {
+        let pri_key_data = storage.read_file(path)?;
+        Self::from_pem(&pri_key_data)
+    }
 }
