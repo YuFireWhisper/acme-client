@@ -37,6 +37,6 @@ fn test_finalize_order() {
     order
         .finalize(&account)
         .unwrap()
-        .download_certificate(&account, "/home/yuwhisper/projects/acme-client/cert.cert")
+        .download_certificate(&account)
         .unwrap();
 }

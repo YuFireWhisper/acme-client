@@ -228,8 +228,12 @@ impl Order {
         }
 
         let cert_key_storage_path = format!("{}/{}/cert_key", &account.email, &self.domain);
-        let cert_key_pair =
-            KeyPair::new(&*account.storage, "RSA", None, Some(&cert_key_storage_path))?;
+        let cert_key_pair = KeyPair::new(
+            &*account.storage,
+            &account.key_pair.alg_name,
+            Some(account.key_pair.key_parameters()?),
+            Some(&cert_key_storage_path),
+        )?;
 
         let csr = Base64::new(
             CSR::new()?
@@ -237,7 +241,6 @@ impl Order {
                 .build(&cert_key_pair)?
                 .to_der()?,
         );
-        println!("CSR: {}", csr.base64_url());
 
         let header = Protection::new(&account.nonce, &account.key_pair.alg_name)
             .set_value(&account.account_url)?
@@ -246,13 +249,7 @@ impl Order {
         let payload = FinalizeOrderPayload::new(&csr).to_base64()?;
         let signature = create_signature(&header, &payload, &account.key_pair)?;
 
-        println!("Protected Header: {}", header.as_str());
-        println!("Payload: {}", payload.as_str());
-        println!("Account URL: {}", account.account_url);
-
         let jws = Jws::new(&header, &payload, &signature)?;
-
-        println!("Finalize: {}", self.finalize);
 
         let response = Client::new()
             .post(&self.finalize)
@@ -270,13 +267,14 @@ impl Order {
 
         let response: OrderUpdateResponse = response.json()?;
         self.status = response.status;
-        println!("Status: {:?}", self.status);
         self.certificate = response.certificate;
 
         Ok(self)
     }
 
-    pub fn download_certificate(&self, account: &Account, path: &str) -> Result<()> {
+    pub fn download_certificate(&self, account: &Account) -> Result<()> {
+        let cert_storage_path = format!("{}/{}/cert", &account.email, &self.domain);
+
         if self.certificate.is_none() || self.status != OrderStatus::Valid {
             return Err(OrderError::OrderNotValid);
         }
@@ -293,7 +291,9 @@ impl Order {
         }
 
         let cert_bytes = response.bytes()?;
-        account.storage.write_file(path, &cert_bytes)?;
+        account
+            .storage
+            .write_file(&cert_storage_path, &cert_bytes)?;
 
         Ok(())
     }
