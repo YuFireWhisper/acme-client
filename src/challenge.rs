@@ -167,7 +167,7 @@ impl Challenge {
         Self::parse_challenges(&response_body, thumbprint)
     }
 
-    pub fn parse_challenges(json: &str, thumbprint: &str) -> Result<Vec<Self>> {
+    fn parse_challenges(json: &str, thumbprint: &str) -> Result<Vec<Self>> {
         let response: AuthorizationResponse =
             serde_json::from_str(json).map_err(ChallengeError::Json)?;
 
@@ -195,7 +195,7 @@ impl Challenge {
         Ok(challenges)
     }
 
-    pub fn validate(&mut self, account: &mut Account) -> Result<()> {
+    pub fn validate(&mut self, account: &Account) -> Result<()> {
         if self.status == ChallengeStatus::Valid {
             return Ok(());
         }

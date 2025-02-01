@@ -104,6 +104,7 @@ impl Account {
 
         let key_pair = KeyPair::new(&storage, &builder.key_pair_alg, Some(builder.key_pair_bits), Some(&account_key_pair_path))?;
         let dir = Directory::new(&storage, &builder.dir_url)?;
+        storage.write_file(&dir_url_path, builder.dir_url.as_bytes())?;
         let account_url = Account::create_account(&dir, &key_pair, &builder.email)?;
         storage.write_file(&account_url_path, account_url.as_bytes())?;
         let nonce = Nonce::new(&dir.new_nonce);
